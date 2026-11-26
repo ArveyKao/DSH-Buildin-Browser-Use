@@ -4,14 +4,14 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Next useful delivery
 
-- User-visible outcome / north star: a DSH Desktop plugin bundle that, once armed, gives the agent tools to drive DSH's built-in browser; all Sessions in one workspace read and drive the same browser pane and share its cookies/cache.
+- User-visible outcome / north star: a DSH Desktop plugin bundle that, once armed, gives the agent tools to drive DSH's built-in browser; each Session drives the pane visible in its own view (DSH keeps one pane per session view), and all Sessions in one workspace share cookies/cache.
 - Accepted problem, hypothesis and success metric: the built-in browser's `WebContentsView` is unreachable in-process (main-process owned, `webviewTag:false`, no Host→Client RPC), so a native Host cordis plugin + CDP (`http://127.0.0.1:9222`) is the working route. Success: two sessions in one workspace demonstrably share one pane and its login state; cookies survive a DSH restart.
 - Non-goals and boundaries: no HTTP-cache persistence across restarts (in-memory partition; cookies only); no cross-workspace sharing; no automated SSO/scan login; no modification of the installed DSH app; MCP-stdio approach dropped (cannot identify the calling Session).
 - Target kind, exact environment and surface: local plugin artifact (Node ESM cordis bundle) loaded by DSH Desktop 0.2.2-rc.5 on this Mac; exercised through the live DSH app launched with `--remote-debugging-port=9222` ("DSH with CDP" launcher).
 - Address, device or artifact location: repo `/Users/mt/plugins/build-in-browser-use`; armed via DSH bundle patch (`dsh.bundle.patch` → `cordis.patch.yml`); cookie state at `~/.dsh/browser-state/<workspace-hash>.json`.
-- Final demo (command/URL, inputs, expected output): with DSH launched via the CDP launcher and the plugin armed — Session A `browser_open` a URL; user signs in once; Session B (same workspace) `browser_snapshot` shows the same pane and authenticated state; after DSH restart, first browser call restores cookies and the login persists.
+- Final demo (command/URL, inputs, expected output): with DSH launched via the CDP launcher and the plugin armed — Session A `browser_open` a URL in its own view; Session B (same workspace) opens/reads its OWN pane; screenshots show what each user sees; after DSH restart, restore-screen views re-spawn their own pane on open and cookies persist per calling workspace. Verified live in `changes/own-visible-pane/evidence/live-verify.md`.
 - Applicable evidence / required review: `node --check` + `node --test` unit tests for scope/state logic; live CDP smoke receipts against the running app; cross-family review of the consolidated candidate.
-- Current next action or waiting dependency: choose allowed worker runtimes (`dispatch runtimes`), then `dispatch prepare`, set goal, and dispatch the consolidation task.
+- Current next action or waiting dependency: none — own-visible-pane model delivered and live-verified; awaiting any new user request.
 
 ## Existing commands
 
@@ -28,10 +28,11 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- Delivered: goal `goal_256ed8e4` (window-pane model). Pane follows the WINDOW displaying the calling session, any workspace; binding guard removed; cookie files stay per calling workspace. Commits `06af84f` (selection) + `c053510` (visible address-bar pick, fixes open when several pane UIs are mounted). Live replay of the user's dead end passed: yl-web session drives the gms-opened pane, switch back to gms works, user's first session reads the same pane; cookie handover isolated per workspace. Receipts: `changes/window-pane/evidence/{verify,verify-address-bar}.json`, `live-reverify.md`, `docs-check.md`.
-- Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), commits through `c80e2fb`, pushed. Live smoke receipt `changes/pane-spawn-fix/evidence/live-smoke.md`.
-- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner), pane left at example.com; user's SSO cookies persist in the gms file.
-- Next: push; no open work.
+- Delivered: goal `goal_f8e1c791` (own-visible-pane model), commits `9c8442c` (visible-bar URL matching, no first-webview fallback, screenshot 15s timeout) + `de5229b` (restore screen → pane null; open clicks Restore page first); 95 tests. Receipts: `changes/own-visible-pane/evidence/` (verify.json, verify-restore.json, live-verify.md, docs-check.md). Live matrix passed: two gms sessions drive their OWN coexisting panes; restore-screen open spawns the view's own pane; yl-web cross-workspace own pane; screenshots + switch-back; cookie files isolated per calling workspace.
+- Delivered: goal `goal_256ed8e4` (window-pane model), commits `06af84f` + `c053510`, receipts `changes/window-pane/evidence/`, pushed through `5e4b1c8`.
+- Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), commits through `c80e2fb`, pushed.
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner). Three test panes left open (example.com / example.org / example.net); user's SSO cookies persist in the gms cookie file.
+- Next: commit receipts + brief, push origin main. No open tasks.
 
 ## Target applicability and access
 
