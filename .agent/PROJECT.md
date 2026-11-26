@@ -28,9 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- In flight: project scaffold committed; orchestrator service bootstrap fixed (config dir must pre-exist; repo needs a base commit before worktrees).
-- Accepted: feasibility verified live (CDP endpoint up, DSH 0.2.2-rc.5); architecture = native Host plugin + CDP, consolidating `/Users/mt/code/deploy-perdevelop/workdir/dsh-workspace-browser` (latest prototype, 2026-11-26).
-- Next: user picks allowed runtimes → `dispatch prepare` → goal set → consolidation task.
+- In flight: implement task `tsk_f084a8a9` (qoder worker, main workspace) — harden baseline plugin + unit tests + docs; goal `goal_90c6a5f6` active.
+- Accepted: feasibility verified live (CDP endpoint up, DSH 0.2.2-rc.5); architecture = native Host plugin + CDP; prototype imported as baseline commit `4417336`; runtime choice = qoder only (user, 2026-11-26); Qoder CLI v1.1.98 installed and signed in.
+- Blocked: nothing. Note: single-runtime choice means cross-family review is unavailable; owner verification + user acceptance substitutes (recorded decision).
+- Next: verify candidate (`node --test tests/` + syntax checks), owner review, decide/apply, then live CDP smoke with user (two sessions, one workspace; restart cookie restore).
 
 ## Target applicability and access
 
