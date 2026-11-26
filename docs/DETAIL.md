@@ -10,7 +10,7 @@ see the calling Session; it drives DSH's built-in browser over CDP.
 |---|---|
 | `browser_targets` | List windows, the Session each shows, their panes, and every CDP target |
 | `browser_scope_probe` | Same mapping plus the chosen pane, its host window and why it was chosen |
-| `browser_open` | Open the workspace browser, optionally loading a URL |
+| `browser_open` | Open the workspace browser, optionally loading a URL (the URL is required when no pane exists yet) |
 | `browser_attach` | Report the pane workspace-scoped calls use |
 | `browser_navigate` | Load a URL in the workspace pane |
 | `browser_open_external` | Hand a URL to the user's own default browser |
@@ -53,6 +53,14 @@ session that is actually displayed there at call time; that is the intended beha
 - If the workspace has no pane yet, one is opened in the calling Session's window; when
   the calling Session is not displayed in any window, another window of the same
   workspace hosts it.
+- DSH creates the pane's `webview` CDP target only after an HTTP(S) URL has been loaded
+  in the pane's address bar (an empty pane never spawns a target). So the first call in
+  a workspace must be `browser_open` (or `browser_navigate`) **with** a URL; every other
+  tool requires an already-open pane and fails fast with
+  "no browser pane is open in this workspace; call browser_open with an HTTP(S) url first".
+- A freshly opened pane already loaded the requested URL through its address bar, so the
+  navigation tools skip `Page.navigate` for it; a reused pane is navigated normally.
+  This avoids loading the URL twice.
 - A pane is bound to the workspace that first drove it; later calls from a different
   workspace are refused rather than served the wrong page.
 - A pane renders in one window only; other Sessions read and drive it, they do not
@@ -76,6 +84,9 @@ the browser action itself.
 - A missing CDP endpoint fails every tool with an explicit
   `--remote-debugging-port` / "DSH with CDP" launcher error; no page is touched.
 - An invalid or non-pane `targetId` fails instead of silently opening another pane.
+- A call that needs a pane but has no URL fails immediately when the workspace has no
+  open pane, instead of opening an empty pane and waiting for a target that never
+  appears.
 - A pane bound to another workspace fails with "refusing to cross workspaces".
 - Read errors for individual windows are reported in `browser_targets` /
   `browser_scope_probe` (`readError`) instead of aborting the whole listing.

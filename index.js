@@ -33,13 +33,26 @@ export const inject = ['tools']
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:9222'
 
+/** CDP operations the tools use; tests replace this bundle with doubles. */
+const DEFAULT_CDP = {
+  connect,
+  evaluate,
+  fetchTargets,
+  openInSystemBrowser,
+  openPaneInWindow,
+  pressKey,
+  readWindows,
+  sleep,
+}
+
 /**
- * Register the workspace-browser tools.
- * @param ctx - plugin registration scope.
- * @param config - optional `{ cdpEndpoint }` from the bundle patch.
+ * Build the workspace-browser tool definitions.
+ * @param ctx - plugin registration scope (workspace and session services).
+ * @param endpoint - CDP endpoint of the DSH app.
+ * @param cdp - CDP operations; production uses `DEFAULT_CDP`.
  */
-export function apply(ctx, config = {}) {
-  const endpoint = typeof config?.cdpEndpoint === 'string' ? config.cdpEndpoint : DEFAULT_ENDPOINT
+export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CDP } = {}) {
+  const tools = []
 
   /** Resolve the calling Session, its workspace, windows and chosen pane. */
   async function resolveScope(exec) {
@@ -64,8 +77,8 @@ export function apply(ctx, config = {}) {
       titles[id] = sessionTitle(live) ?? null
     }
 
-    const targets = await fetchTargets(endpoint)
-    const windows = await readWindows(targets)
+    const targets = await cdp.fetchTargets(endpoint)
+    const windows = await cdp.readWindows(targets)
     const choice = chooseWorkspacePane(windows, {
       sessionIds,
       titles,
@@ -75,16 +88,22 @@ export function apply(ctx, config = {}) {
     return { session, workspace, sessionIds, titles, targets, windows, choice }
   }
 
-  /** Open a pane in the window chosen for this workspace and wait for its page target. */
-  async function openPaneInCallerWindow(scope) {
+  /**
+   * Open a pane in the window chosen for this workspace, loading `url` through
+   * its address bar, and wait for its page target.
+   *
+   * DSH only spawns the pane's webview CDP target once an HTTP(S) URL has been
+   * loaded, so waiting after opening an empty pane can never succeed.
+   */
+  async function openPaneInCallerWindow(scope, url) {
     const window = scope.choice.callerWindow
     if (window === null) {
       throw new Error(`cannot open a workspace browser: ${scope.choice.reason}`)
     }
-    await openPaneInWindow(window.page)
+    await cdp.openPaneInWindow(window.page, url)
     for (let i = 0; i < 25; i += 1) {
-      await sleep(300)
-      const targets = await fetchTargets(endpoint)
+      await cdp.sleep(300)
+      const targets = await cdp.fetchTargets(endpoint)
       const pane = targets.find(
         (target) => target.type === 'webview' && target.parentId === window.pageTargetId,
       )
@@ -118,19 +137,33 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Run a callback against the workspace pane, opening one when needed.
+   * Run a callback against the workspace pane.
    * @param exec - tool execution context (carries the calling Session).
    * @param args - tool arguments; `targetId` overrides the workspace pane.
-   * @param callback - `(cdpSession, { pane, workspace }) => value`.
+   * @param openUrl - HTTP(S) URL used when a pane must be opened; undefined when
+   *   the call may only reuse an existing pane.
+   * @param callback - `(cdpSession, { pane, workspace, opened }) => value`;
+   *   `opened` says the pane just loaded `openUrl` through its address bar.
    */
-  async function withPane(exec, args, callback) {
+  async function withPane(exec, args, openUrl, callback) {
     const scope = await resolveScope(exec)
     if (scope.workspace === undefined) {
       throw new Error('this Session is not attached to a workspace yet, so no workspace browser exists')
     }
 
     let pane = resolvePane(scope, args.targetId)
-    if (pane === null) pane = await openPaneInCallerWindow(scope)
+    let opened = false
+    if (pane === null) {
+      if (openUrl === undefined) {
+        // Opening an empty pane yields no webview target, so waiting for one
+        // only burns the timeout; fail fast and name the tool that can open it.
+        throw new Error(
+          'no browser pane is open in this workspace; call browser_open with an HTTP(S) url first',
+        )
+      }
+      pane = await openPaneInCallerWindow(scope, openUrl)
+      opened = true
+    }
 
     // A pane lives in a window, and that window's Session can change to one from
     // another workspace. Bind the pane to the workspace that first used it and
@@ -145,7 +178,7 @@ export function apply(ctx, config = {}) {
     }
     bindPane(pane.id, scope.workspace)
 
-    const session = await connect(pane)
+    const session = await cdp.connect(pane)
     try {
       let restored = 'skipped'
       try {
@@ -153,14 +186,14 @@ export function apply(ctx, config = {}) {
       } catch {
         restored = 'failed'
       }
-      const value = await callback(session, { pane, workspace: scope.workspace })
+      const value = await callback(session, { pane, workspace: scope.workspace, opened })
       let persisted = 0
       try {
         persisted = await snapshotCookies(session, scope.workspace)
       } catch {
         persisted = -1
       }
-      return { value, pane, workspace: scope.workspace, restored, persisted }
+      return { value, pane, workspace: scope.workspace, opened, restored, persisted }
     } finally {
       session.close()
     }
@@ -181,7 +214,7 @@ export function apply(ctx, config = {}) {
     description: 'Optional CDP target id to override the workspace pane.',
   }
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_targets',
     description: 'List DSH windows, the Session each window shows, and the browser pane each hosts, '
       + 'plus every CDP target. Use it to confirm the built-in browser is reachable and to see '
@@ -209,7 +242,7 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_scope_probe',
     description: 'Report the calling Session, its workspace, every window with the Session it shows, '
       + 'the pane the workspace-scoped algorithm chooses, and why. Use it to diagnose why a browser '
@@ -244,10 +277,10 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_open',
     description: 'Open the workspace browser, optionally loading a URL. Reuses the pane another Session '
-      + 'of this workspace opened; otherwise opens one in a DSH window of this workspace.',
+      + 'of this workspace opened; otherwise opens one in a DSH window of this workspace, which requires a URL.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Optional URL to load after opening.' } },
@@ -257,13 +290,14 @@ export function apply(ctx, config = {}) {
       if (args.url !== undefined && (typeof args.url !== 'string' || args.url.length === 0)) {
         throw new Error('url must be a non-empty string')
       }
-      const result = await withPane(exec, args, async (session, { pane }) => {
-        if (args.url !== undefined) {
+      const result = await withPane(exec, args, args.url, async (session, { pane, opened }) => {
+        // A freshly opened pane already loaded args.url through its address bar.
+        if (args.url !== undefined && !opened) {
           await session.send('Page.enable').catch(() => {})
           await session.send('Page.navigate', { url: args.url })
-          await sleep(1200)
+          await cdp.sleep(1200)
         }
-        const info = await evaluate(
+        const info = await cdp.evaluate(
           session,
           'JSON.stringify({ url: location.href, title: document.title })',
         )
@@ -273,24 +307,24 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_attach',
     description: 'Report the pane that workspace-scoped calls use, without navigating. Attaching is '
       + 'implicit for every other browser tool.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
-      const result = await withPane(exec, args, async (session, { pane }) => {
-        const info = await evaluate(session, 'JSON.stringify({ url: location.href, title: document.title })')
+      const result = await withPane(exec, args, undefined, async (session, { pane }) => {
+        const info = await cdp.evaluate(session, 'JSON.stringify({ url: location.href, title: document.title })')
         return `${pane.id} ${info}`
       })
       return `Attached to ${result.value}`
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_navigate',
     description: 'Navigate the workspace pane to a URL. Opens a pane in the workspace\'s window '
-      + 'when the workspace has none.',
+      + 'when the workspace has none; a freshly opened pane loads the URL through its address bar.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'URL to load.' }, targetId: targetIdParameter },
@@ -298,17 +332,22 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('url is required')
-      const result = await withPane(exec, args, async (session) => {
-        await session.send('Page.enable').catch(() => {})
-        const nav = await session.send('Page.navigate', { url: args.url })
-        await sleep(1200)
+      const result = await withPane(exec, args, args.url, async (session, { opened }) => {
+        // The address bar already loaded args.url into a freshly opened pane;
+        // navigating again would load it twice.
+        let nav = null
+        if (!opened) {
+          await session.send('Page.enable').catch(() => {})
+          nav = await session.send('Page.navigate', { url: args.url })
+          await cdp.sleep(1200)
+        }
         const errorText = nav?.errorText
         if (typeof errorText === 'string' && errorText.length > 0) {
           // VPN/proxy-only hosts are unreachable from the app's network context.
-          await openInSystemBrowser(args.url)
+          await cdp.openInSystemBrowser(args.url)
           return { handedToSystemBrowser: true, errorText }
         }
-        const info = await evaluate(session, 'JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })')
+        const info = await cdp.evaluate(session, 'JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })')
         return { handedToSystemBrowser: false, info }
       })
       if (result.value.handedToSystemBrowser) {
@@ -318,7 +357,7 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_open_external',
     description: 'Open a URL in the user\'s own default browser instead of the DSH pane. Use for hosts the '
       + 'pane cannot reach (VPN/proxy only) or when the user wants their real browser profile. Nothing is '
@@ -331,22 +370,22 @@ export function apply(ctx, config = {}) {
     },
     async execute(args) {
       if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('url is required')
-      await openInSystemBrowser(args.url)
+      await cdp.openInSystemBrowser(args.url)
       return `Opened ${args.url} in your default browser.`
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_snapshot',
     description: 'Read the workspace pane: URL, title, visible text, links and form fields.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
-      const result = await withPane(exec, args, async (session) => evaluate(session, SNAPSHOT_SCRIPT))
+      const result = await withPane(exec, args, undefined, async (session) => cdp.evaluate(session, SNAPSHOT_SCRIPT))
       return result.value
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_click',
     description: 'Click the first element matching a CSS selector in the workspace pane.',
     parameters: {
@@ -356,16 +395,16 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.selector !== 'string') throw new Error('selector is required')
-      const result = await withPane(exec, args, async (session) => {
-        const outcome = await evaluate(session, clickScript(args.selector))
-        await sleep(600)
+      const result = await withPane(exec, args, undefined, async (session) => {
+        const outcome = await cdp.evaluate(session, clickScript(args.selector))
+        await cdp.sleep(600)
         return String(outcome)
       })
       return `Click ${args.selector}: ${result.value} | cookies persisted: ${result.persisted}`
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_type',
     description: 'Set an input value in the workspace pane and fire input/change, optionally pressing Enter.',
     parameters: {
@@ -381,11 +420,11 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       if (typeof args.selector !== 'string') throw new Error('selector is required')
       if (args.text !== undefined && typeof args.text !== 'string') throw new Error('text must be a string')
-      const result = await withPane(exec, args, async (session) => {
-        const outcome = await evaluate(session, typeScript(args.selector, args.text ?? ''))
+      const result = await withPane(exec, args, undefined, async (session) => {
+        const outcome = await cdp.evaluate(session, typeScript(args.selector, args.text ?? ''))
         if (outcome === 'typed' && args.submit === true) {
-          await pressKey(session, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, text: '\r' })
-          await sleep(900)
+          await cdp.pressKey(session, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, text: '\r' })
+          await cdp.sleep(900)
         }
         return String(outcome)
       })
@@ -393,7 +432,7 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_evaluate',
     description: 'Evaluate a JavaScript expression in the workspace pane and return its value.',
     parameters: {
@@ -403,8 +442,8 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.expression !== 'string') throw new Error('expression is required')
-      const result = await withPane(exec, args, async (session) => {
-        const value = await evaluate(session, args.expression)
+      const result = await withPane(exec, args, undefined, async (session) => {
+        const value = await cdp.evaluate(session, args.expression)
         if (value === undefined) return 'undefined'
         return typeof value === 'string' ? value : JSON.stringify(value)
       })
@@ -412,7 +451,7 @@ export function apply(ctx, config = {}) {
     },
   }))
 
-  ctx.tools.register(textTool({
+  tools.push(textTool({
     name: 'browser_screenshot',
     description: 'Capture a PNG of the workspace pane and save it under ~/.dsh/browser-state/shots.',
     parameters: {
@@ -424,7 +463,7 @@ export function apply(ctx, config = {}) {
       if (args.filePath !== undefined && (typeof args.filePath !== 'string' || args.filePath.length === 0)) {
         throw new Error('filePath must be a non-empty string')
       }
-      const result = await withPane(exec, args, async (session) => {
+      const result = await withPane(exec, args, undefined, async (session) => {
         const shot = await session.send('Page.captureScreenshot', { format: 'png' })
         const path = typeof args.filePath === 'string'
           ? args.filePath
@@ -436,4 +475,16 @@ export function apply(ctx, config = {}) {
       return `Saved ${result.value}`
     },
   }))
+
+  return tools
+}
+
+/**
+ * Register the workspace-browser tools.
+ * @param ctx - plugin registration scope.
+ * @param config - optional `{ cdpEndpoint }` from the bundle patch.
+ */
+export function apply(ctx, config = {}) {
+  const endpoint = typeof config?.cdpEndpoint === 'string' ? config.cdpEndpoint : DEFAULT_ENDPOINT
+  for (const tool of createTools({ ctx, endpoint })) ctx.tools.register(tool)
 }
