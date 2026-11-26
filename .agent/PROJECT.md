@@ -28,10 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- In flight: live smoke (goal criterion 3) — waiting on user to restart DSH via the CDP launcher and run the two-session scenario.
-- Accepted: implement task `tsk_f084a8a9` verified (42/42 tests, syntax OK, diff claims checked) and applied; committed `672abe8`, pushed to github.com/ArveyKao/DSH-Buildin-Browser-Use. Goal checks pass (`goal_ba37c1c5`).
-- Armed: `~/.dsh/profiles/desktop/package.json` links `@local/dsh-workspace-browser` → this repo; obsolete `@local/dsh-builtin-browser` MCP bundle removed (user approved 2026-11-26; backup `package.json.bak-20261126-152741`). Takes effect on next DSH start.
-- Next: user restarts DSH with CDP launcher → session A `browser_open` a URL → session B (same workspace) `browser_snapshot` shows same pane → user signs in once → restart DSH → first browser call restores cookies. Record receipts, then `dispatch goal done`.
+- In flight: fix task for pane-spawn regression found in live smoke. `browser_open` fails ("pane opened but no page target appeared"): hardening dropped the URL arg from `openPaneInCallerWindow` → `openPaneInWindow`; DSH spawns the webview target only after an HTTP(S) URL is typed in the pane address bar (verified live; about:blank rejected). Prototype passed the URL through. Worker fix dispatched (restore openUrl flow + skip double navigation + clear error for URL-less spawn).
+- Accepted: implement task `tsk_f084a8a9` verified (42/42 tests) and applied; committed `672abe8`, pushed. Goal checks pass (`goal_ba37c1c5`).
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; plugin confirmed live in restarted DSH (tools registered, agent called browser_open/browser_scope_probe; LLM key resolved via host credential broker `~/.dsh/.credentials.yaml` refs, not process env).
+- Next: verify/accept/apply fix → restart DSH (fresh, no pane) → session A browser_open example.com (spawn path) → session B browser_snapshot same pane → test cookie via browser_evaluate + snapshot file check → restart → restore-on-first-call. Record receipts, `dispatch goal done`.
 
 ## Target applicability and access
 
