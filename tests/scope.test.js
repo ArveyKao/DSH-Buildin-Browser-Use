@@ -5,6 +5,7 @@ import {
   chooseCallerPane,
   describeTargets,
   matchVisiblePane,
+  matchVisiblePanes,
   sessionTitle,
   windowSessionTitle,
 } from '../lib/scope.js'
@@ -69,6 +70,56 @@ test('matchVisiblePane treats null, empty and invalid URLs as no match', () => {
   assert.equal(matchVisiblePane([{ id: 'bad', type: 'webview', url: 'nope' }], 'https://x.test/'), null)
 })
 
+test('matchVisiblePanes lists every same-URL webview in target order', () => {
+  const views = [
+    { id: 'pane-a', type: 'webview', url: 'https://x.test/same' },
+    { id: 'pane-b', type: 'webview', url: 'https://x.test/other' },
+    { id: 'pane-c', type: 'webview', url: 'https://x.test/same/' },
+  ]
+  assert.deepEqual(matchVisiblePanes(views, 'https://x.test/same').map((view) => view.id), ['pane-a', 'pane-c'])
+  assert.deepEqual(matchVisiblePanes(views, 'https://x.test/missing'), [])
+  assert.deepEqual(matchVisiblePanes(views, null), [])
+  assert.deepEqual(matchVisiblePanes(views, 'not a url'), [])
+  assert.deepEqual(matchVisiblePanes(undefined, 'https://x.test/same'), [])
+})
+
+test('chooseCallerPane carries a same-URL pane error from the caller window', () => {
+  const windows = [
+    {
+      ...windowRecord({ id: 'w1', sessionId: 's1' }),
+      paneError: 'ambiguous',
+      paneErrorMessage: 'could not identify the browser pane visible in this session\'s view',
+    },
+  ]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1' })
+  assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow.pageTargetId, 'w1')
+  assert.equal(choice.paneError, 'ambiguous')
+  assert.equal(choice.paneErrorMessage, 'could not identify the browser pane visible in this session\'s view')
+  assert.equal(choice.reason, choice.paneErrorMessage)
+})
+
+test('chooseCallerPane carries a pane error through the title fallback', () => {
+  const windows = [
+    {
+      ...windowRecord({ id: 'w1', sessionId: null, title: 'Docs — DeepSeek Harness' }),
+      paneError: 'no-capture',
+      paneErrorMessage: 'bring this session\'s DSH window to the front and retry',
+    },
+  ]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', callerTitle: 'Docs' })
+  assert.equal(choice.chosen, null)
+  assert.equal(choice.matchedBy, 'title')
+  assert.equal(choice.paneError, 'no-capture')
+  assert.equal(choice.reason, 'bring this session\'s DSH window to the front and retry')
+})
+
+test('chooseCallerPane reports no pane error for a normal choice', () => {
+  const windows = [windowRecord({ id: 'w1', sessionId: 's1', paneId: 'pane-1' })]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1' })
+  assert.equal(choice.paneError, null)
+  assert.equal(choice.paneErrorMessage, null)
+})
 
 test('chooseCallerPane chooses the pane of the window showing the caller', () => {
   const windows = [

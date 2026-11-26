@@ -5,9 +5,10 @@ tools to drive DSH's built-in browser pane over the Chrome DevTools Protocol (CD
 
 DSH keeps one browser pane **per session view**. The plugin drives the pane that
 is VISIBLE in the calling Session's own view: it matches the window's visible
-address-bar URL against that window's webview targets, and `browser_open` /
-`browser_navigate` load the URL through that visible bar. Other sessions'
-webviews (alive but hidden) are never driven. A view restored from a previous
+address-bar URL against that window's webview targets, and when several show the
+same URL only the one whose frame capture completes is chosen (hidden panes never
+complete). `browser_open` / `browser_navigate` load the URL through that visible
+bar. Other sessions' webviews (alive but hidden) are never driven. A view restored from a previous
 process shows a "Restore page" screen with a stale bar and no pane of its own;
 the plugin restores it before loading. Cookie snapshot files stay per workspace.
 
@@ -33,8 +34,10 @@ therefore map it to the pane visible in its own view.
   value and whether a "Restore page" affordance is mounted. The caller's window
   decides which view belongs to the caller, and the bar URL is normalized and
   matched against every webview in that window. There is no first-webview
-  fallback: an unmatched bar means no visible pane yet. Window-title matching is
-  only a fallback when no window yields a session id.
+  fallback: an unmatched bar means no visible pane yet. When 2+ webviews match,
+  each is probed in parallel with a 1×1 `Page.captureScreenshot` bounded at
+  ~2.5s, and only the one whose capture completes is the rendered pane.
+  Window-title matching is only a fallback when no window yields a session id.
 - **Restore screens report no pane.** A view whose pane was loaded in a previous
   DSH process reopens on a "Previously opened / <title> / Restore page" screen:
   its address bar is mounted and pre-filled with the OLD URL, but the view has
@@ -57,14 +60,22 @@ therefore map it to the pane visible in its own view.
   changed. A hidden view that already showed that URL is never taken.
 - **Explicit `targetId` must be the caller's own pane.** An unknown id, a non-pane
   target, or another webview (even in the same window) is refused.
-- **Identical URLs are indistinguishable.** Two views showing the exact same URL
-  cannot be told apart by URL, so the first matching webview is used. Restore
-  screens are the exception: their stale bar never identifies a live pane.
+- **Identical URLs are disambiguated by capture completion.** Two or more views
+  showing the exact same URL match the bar equally, so each candidate gets a 1×1 PNG
+  `Page.captureScreenshot` probe bounded at ~2.5s, run in parallel. A hidden pane
+  never completes a capture; the rendered pane does once its DSH window is in
+  front/active. Exactly one completer is driven. Zero completers (for example,
+  the window is not in front) or several leave the visible pane unidentified and
+  the call fails with a clear "bring this session's DSH window to the front and
+  retry" message — never a first-match guess. A sole URL match is used unprobed.
+  Restore screens are the exception: their stale bar never identifies a live
+  pane and is never probed.
 - **Not displayed, no pane.** A Session shown in no open window gets a clear
   error: switch to it in a DSH window first.
 - **Screenshots are bounded.** `Page.captureScreenshot` never completes on a
-  hidden webview, so `browser_screenshot` fails after 15s with an explicit
-  "pane may be hidden" error instead of hanging the turn.
+  hidden webview — the same property selection relies on — so `browser_screenshot`
+  fails after 15s with an explicit "pane may be hidden" error instead of hanging
+  the turn.
 
 ## Cookie persistence
 
@@ -133,8 +144,11 @@ order and failure behavior: [docs/DETAIL.md](docs/DETAIL.md).
   processes — a developer-machine setting, not a shared-host one.
 - Each session drives the pane visible in its own view; other views' webviews are
   never touched. Calls within the same view are not locked against each other.
-- Two views showing the identical URL are indistinguishable by URL; the first
-  matching webview is used. A restore screen's stale bar never matches.
+- Two or more views showing the identical URL are told apart by capture
+  completion, not by URL: each candidate gets a 1×1 screenshot bounded at ~2.5s,
+  so such a call can take ~2.5s. Zero or several completers fail with a clear
+  error — keep this session's DSH window in front when two views share a URL. A
+  restore screen's stale bar never matches.
 - No HTTP-cache persistence and no pane mirroring. The cookie jar itself is
   app-wide; only the snapshot files stay per workspace.
 - Pane tools other than `browser_open` / `browser_navigate` need a visible pane.
@@ -149,8 +163,10 @@ node --test
 ```
 
 `node --test` runs the unit tests for per-view pane selection, visible-bar URL
-matching, restore-screen detection (shell read and opener), the screenshot
-timeout and cookie state (no browser, no network).
+matching, capture-completion disambiguation of identical URLs (probe bounds,
+parallelism, session closure, clear pane errors), restore-screen detection (shell
+read and opener), the screenshot timeout and cookie state (no browser, no
+network).
 
 ## License
 

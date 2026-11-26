@@ -4,7 +4,9 @@ DSH keeps one browser pane **per session view**, not one per window. The plugin
 drives the pane that is VISIBLE in the calling Session's own view: it reads the
 window's visible address-bar URL, matches it against that window's webview
 targets, and loads `browser_open` / `browser_navigate` URLs through that same
-visible bar. Other sessions' webviews stay alive but hidden and are never driven.
+visible bar. When several webviews show that same URL, a bounded 1×1 screenshot
+probe picks the one whose capture completes (hidden panes never complete).
+Other sessions' webviews stay alive but hidden and are never driven.
 A view restored from a previous process shows a "Restore page" screen whose bar
 is stale and which owns no webview; the opener restores it before loading.
 The plugin is a native Host cordis bundle (`export function apply(ctx)`), so it
@@ -53,9 +55,9 @@ authoritative. Within it:
 
 - `views` is every `webview` target whose `parentId` is that window's page
   target — all session views' webviews, visible or hidden.
-- `pane` is `matchVisiblePane(views, visiblePaneUrl)`: both URLs are normalized
-  with `URL` (host case folded, a trailing `/` dropped from a non-root path) and
-  the first matching webview wins. Null/empty/invalid URLs match nothing.
+- `pane` comes from `selectPane(views, visiblePaneUrl, deps)`: both URLs are
+  normalized with `URL` (host case folded, a trailing `/` dropped from a non-root
+  path). Null/empty/invalid URLs match nothing.
 - There is **no first-webview fallback**. A bar value with no matching webview
   means no visible pane yet, even when the window hosts other views' hidden
   webviews.
@@ -63,14 +65,34 @@ authoritative. Within it:
   The bar belongs to a restore screen ("Previously opened / <title> / Restore
   page") for a pane loaded in a previous process: it is pre-filled with the OLD
   URL and the view has no webview of its own yet. That stale value must never
-  pick another view's webview just because the URLs coincide. `visiblePaneUrl`
-  and `views` are still reported.
-- **Identical URLs are indistinguishable.** If two views show the exact same
-  URL, the first matching webview is used; URL matching cannot tell them apart.
-  Restore screens are exempt because they never match.
+  pick another view's webview just because the URLs coincide, and it is never
+  probed. `visiblePaneUrl` and `views` are still reported.
+- **Identical URLs are disambiguated by capture completion.** If several
+  webviews show the exact same URL, `selectPane` gives each candidate its own
+  CDP session and sends `Page.captureScreenshot` with `format: 'png'` and
+  `clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 }`, raced against a
+  `CAPTURE_PROBE_TIMEOUT_MS` (2500ms) sleep. Probes run in parallel and every
+  probe session is closed in `finally`, so an abandoned capture is rejected
+  (never leaked or left hanging) and image data is discarded. Capture completion
+  tracks the rendered pane: a hidden pane never completes, and the displayed
+  pane completes once its DSH window is front/active.
+  - 0 or 1 URL match: used directly, **no probe**.
+  - Exactly one candidate completes: that pane is chosen.
+  - Zero candidates complete (usually the window is not in front): `pane` is
+    `null` with `paneError: 'no-capture'`.
+  - Several complete: `pane` is `null` with `paneError: 'ambiguous'`.
+  - Both error kinds carry a human `paneErrorMessage` that says the visible pane
+    could not be identified and asks to bring this session's DSH window to the
+    front and retry. There is no first-match guess, and the message does not
+    suggest `browser_open`. An ambiguous same-URL window costs up to ~2.5s per
+    selection.
 
 Matching by window title (`<session title> — DeepSeek Harness`) is kept only as a
 fallback for builds where no window yields a stored session id.
+
+`browser_targets` and `browser_scope_probe` report each window's `paneError`
+kind (or `null`) so an ambiguous or not-in-front window can be diagnosed; pane
+tools fail with the human message instead of driving a guess.
 
 **Switching sessions switches the visible pane.** The newly displayed view's own
 address bar and webview become the target; there is no handover of one shared
@@ -127,17 +149,19 @@ normally. This avoids loading the URL twice.
 - A view showing a restore screen reports `restoring: true` and no pane; its
   stale bar is never matched, even against an identical URL. Opening clicks
   "Restore page" first so the view's own pane spawns.
-- Two views showing the identical URL are indistinguishable by URL; the first
-  matching webview is used. Restore screens never match.
+- Two or more views showing the identical URL are disambiguated by which pane
+  completes a 1×1 capture within ~2.5s (probed in parallel). The one completer is
+  driven; zero or several completers fail clearly. Restore screens are never
+  probed and never match.
 - A Session that is not displayed in any open window cannot be routed to a pane.
   The call fails with "this session is not displayed in any open window; switch
   to it in a DSH window first".
 - An explicit `targetId` must be the pane visible in the caller's view; anything
   else fails with "CDP target … is not this session's browser pane".
 - `browser_screenshot` bounds `Page.captureScreenshot` at 15s. A hidden webview
-  produces no frames, so the call fails with "screenshot timed out after 15s; the
-  pane may be hidden — switch to this session in its DSH window and retry"
-  instead of hanging the turn.
+  never completes that capture, so the call fails with "screenshot timed out
+  after 15s; the pane may be hidden — switch to this session in its DSH window
+  and retry" instead of hanging the turn.
 
 ## Cookie persistence
 
@@ -164,6 +188,9 @@ tool output shows `persisted: -1` and a failed restore shows
 - An explicit `targetId` that is not the caller's own visible pane (including
   another view's webview in the same window) fails instead of driving it.
 - A Session not displayed in any open window fails with the switch-to-session message.
+- Same-URL panes that no probe can disambiguate fail with `paneError`
+  `'no-capture'` or `'ambiguous'` and the "bring this session's DSH window to the
+  front and retry" message instead of driving a first-match guess.
 - A call that needs a pane but has no URL fails immediately when the caller's view
   has no visible pane, instead of opening an empty pane and waiting for a target
   that never appears.

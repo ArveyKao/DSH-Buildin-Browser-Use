@@ -5,7 +5,9 @@
  * own address bar and webview target, and only the view the user is looking at
  * is visible. The tools therefore drive the pane VISIBLE in the caller's view:
  * the window's visible address-bar URL is matched against that window's webview
- * targets, and `browser_open` loads the URL through the caller's visible bar.
+ * targets, and when several webviews show that same URL only the one completing
+ * a frame capture is chosen (hidden panes never complete), and `browser_open`
+ * loads the URL through the caller's visible bar.
  * Other session views' webviews are never driven. A view restored from a
  * previous process shows a "Restore page" screen whose bar is stale and which
  * owns no webview; `browser_open` trusted-clicks Restore page first. A Session
@@ -113,6 +115,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
       webviewCount: win.views.length,
       paneTargetId: win.pane?.id ?? null,
       paneUrl: win.pane?.url ?? null,
+      paneError: win.paneError ?? null,
       showsCaller: win.currentSessionId === scope.session.id,
       workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
     }))
@@ -191,6 +194,13 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
     const scope = await resolveScope(exec)
     if (scope.workspace === undefined) {
       throw new Error('this Session is not attached to a workspace yet, so cookies cannot be stored')
+    }
+    // A same-URL ambiguity is not a "no pane yet" state: opening another pane
+    // or retrying browser_open cannot identify the visible one, so fail before
+    // resolvePane and the open path with the probe's own message.
+    if (scope.choice.paneError) {
+      throw new Error(scope.choice.paneErrorMessage
+        ?? "could not identify the browser pane visible in this session's view; bring this session's DSH window to the front and retry")
     }
 
     let pane = resolvePane(scope, args.targetId)
@@ -283,6 +293,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
           ? null
           : { id: scope.choice.chosen.id, url: scope.choice.chosen.url, title: scope.choice.chosen.title },
         matchedBy: scope.choice.matchedBy,
+        paneError: scope.choice.paneError ?? null,
         reason: scope.choice.reason,
         callerWindowId: scope.choice.callerWindow?.pageTargetId ?? null,
       }

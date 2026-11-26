@@ -3,10 +3,13 @@ import assert from 'node:assert/strict'
 import vm from 'node:vm'
 
 import {
+  CAPTURE_PROBE_TIMEOUT_MS,
   parseCurrentSession,
   parseVisiblePaneUrl,
   parseWindowShell,
+  probeCaptureCompletion,
   readWindows,
+  selectPane,
   WINDOW_SHELL_SCRIPT,
 } from '../lib/windows.js'
 
@@ -272,4 +275,348 @@ test('readWindows reports a shell read error and chooses no pane', async () => {
   assert.equal(windows[0].visiblePaneUrl, null)
   assert.equal(windows[0].restoring, false)
   assert.equal(windows[0].pane, null)
+})
+
+// --- Capture-completion disambiguation for identical same-URL panes ---
+
+const SAME = 'https://same.example/'
+const SAME_VIEWS = [
+  { id: 'pane-hidden', type: 'webview', parentId: 'window-1', url: SAME },
+  { id: 'pane-visible', type: 'webview', parentId: 'window-1', url: SAME },
+]
+const SAME_SHELL = { 'window-1': { current: '{"sessionId":"session-1"}', address: SAME } }
+
+/** Probe session double recording its close so leaks are visible. */
+function probeSession(id, closed) {
+  return { id, close() { closed.push(id) } }
+}
+
+/** Resolves after `ms` real milliseconds, so a fake send can win the race. */
+const slowSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('CAPTURE_PROBE_TIMEOUT_MS exports the documented 2.5s bound', () => {
+  assert.equal(CAPTURE_PROBE_TIMEOUT_MS, 2500)
+})
+
+test('probeCaptureCompletion reports a completing 1×1 PNG capture and closes its session', async () => {
+  const closed = []
+  const sent = []
+  const slept = []
+  const ok = await probeCaptureCompletion(SAME_VIEWS[1], {
+    async connect(view) {
+      return probeSession(view.id, closed)
+    },
+    async send(session, method, params) {
+      sent.push({ id: session.id, method, params })
+      return { data: 'discarded-image-data' }
+    },
+    async sleep(ms) {
+      slept.push(ms)
+      return slowSleep(20)
+    },
+  })
+
+  assert.equal(ok, true)
+  assert.deepEqual(closed, ['pane-visible'])
+  assert.deepEqual(sent, [{
+    id: 'pane-visible',
+    method: 'Page.captureScreenshot',
+    params: { format: 'png', clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } },
+  }])
+  assert.deepEqual(slept, [2500])
+})
+
+test('probeCaptureCompletion returns false at the cap and still closes the session', async () => {
+  const closed = []
+  const slept = []
+  const ok = await probeCaptureCompletion(SAME_VIEWS[0], {
+    async connect(view) {
+      return probeSession(view.id, closed)
+    },
+    send() {
+      return new Promise(() => {})
+    },
+    async sleep(ms) {
+      slept.push(ms)
+    },
+  })
+
+  assert.equal(ok, false)
+  assert.deepEqual(slept, [2500])
+  assert.deepEqual(closed, ['pane-hidden'])
+})
+
+test('probeCaptureCompletion treats a throwing send as no capture and closes', async () => {
+  const closed = []
+  const ok = await probeCaptureCompletion(SAME_VIEWS[0], {
+    async connect(view) {
+      return probeSession(view.id, closed)
+    },
+    send() {
+      throw new Error('send exploded')
+    },
+    sleep() {
+      return new Promise(() => {})
+    },
+  })
+
+  assert.equal(ok, false)
+  assert.deepEqual(closed, ['pane-hidden'])
+})
+
+test('probeCaptureCompletion treats a rejecting send as no capture and closes', async () => {
+  const closed = []
+  const ok = await probeCaptureCompletion(SAME_VIEWS[0], {
+    async connect(view) {
+      return probeSession(view.id, closed)
+    },
+    send() {
+      return Promise.reject(new Error('send rejected'))
+    },
+    sleep() {
+      return new Promise(() => {})
+    },
+  })
+
+  assert.equal(ok, false)
+  assert.deepEqual(closed, ['pane-hidden'])
+})
+
+test('probeCaptureCompletion treats a connect error as no capture', async () => {
+  let sends = 0
+  const ok = await probeCaptureCompletion(SAME_VIEWS[0], {
+    async connect() {
+      throw new Error('no socket')
+    },
+    send() {
+      sends += 1
+      return {}
+    },
+    sleep() {
+      return new Promise(() => {})
+    },
+  })
+
+  assert.equal(ok, false)
+  assert.equal(sends, 0)
+})
+
+test('selectPane chooses a sole URL match without probing', async () => {
+  let connects = 0
+  const selection = await selectPane([VISIBLE], 'https://visible.example/docs/', {
+    async connect() {
+      connects += 1
+      return { close() {} }
+    },
+    async send() {
+      return {}
+    },
+    async sleep() {},
+  })
+
+  assert.equal(selection.pane.id, 'pane-visible')
+  assert.equal(selection.paneError, null)
+  assert.equal(selection.paneErrorMessage, null)
+  assert.equal(connects, 0)
+})
+
+test('selectPane reports no pane and no error when no webview matches the bar', async () => {
+  let connects = 0
+  const selection = await selectPane(SAME_VIEWS, 'https://other.example/', {
+    async connect() {
+      connects += 1
+      return { close() {} }
+    },
+    async send() {
+      return {}
+    },
+    async sleep() {},
+  })
+
+  assert.equal(selection.pane, null)
+  assert.equal(selection.paneError, null)
+  assert.equal(connects, 0)
+})
+
+test('selectPane picks the one same-URL pane whose capture completes', async () => {
+  const closed = []
+  const selection = await selectPane(SAME_VIEWS, SAME, {
+    async connect(view) {
+      return probeSession(view.id, closed)
+    },
+    send(session) {
+      return session.id === 'pane-visible'
+        ? Promise.resolve({ data: 'discarded' })
+        : new Promise(() => {})
+    },
+    sleep() {
+      return slowSleep(10)
+    },
+  })
+
+  assert.equal(selection.pane.id, 'pane-visible')
+  assert.equal(selection.paneError, null)
+  assert.deepEqual(closed.sort(), ['pane-hidden', 'pane-visible'])
+})
+
+test('selectPane reports no-capture when no same-URL pane completes, never a guess', async () => {
+  const selection = await selectPane(SAME_VIEWS, SAME, {
+    async connect(view) {
+      return probeSession(view.id, [])
+    },
+    send() {
+      return new Promise(() => {})
+    },
+    async sleep() {},
+  })
+
+  assert.equal(selection.pane, null)
+  assert.equal(selection.paneError, 'no-capture')
+  assert.match(selection.paneErrorMessage, /could not identify the browser pane visible in this session's view/)
+  assert.match(selection.paneErrorMessage, /bring this session's DSH window to the front and retry/)
+  assert.doesNotMatch(selection.paneErrorMessage, /call browser_open/)
+})
+
+test('selectPane reports ambiguous when several same-URL panes complete', async () => {
+  const selection = await selectPane(SAME_VIEWS, SAME, {
+    async connect(view) {
+      return probeSession(view.id, [])
+    },
+    async send() {
+      return { data: 'discarded' }
+    },
+    sleep() {
+      return new Promise(() => {})
+    },
+  })
+
+  assert.equal(selection.pane, null)
+  assert.equal(selection.paneError, 'ambiguous')
+  assert.match(selection.paneErrorMessage, /several same-URL panes completed a frame capture/)
+  assert.match(selection.paneErrorMessage, /bring this session's DSH window to the front and retry/)
+  assert.doesNotMatch(selection.paneErrorMessage, /call browser_open/)
+})
+
+test('selectPane probes same-URL candidates in parallel', async () => {
+  // Sequential probing would deadlock on bothConnected; the guard turns that
+  // into a failure instead of a hung suite.
+  let connected = 0
+  let release
+  const bothConnected = new Promise((resolve) => { release = resolve })
+  const closed = []
+  const outcome = await Promise.race([
+    selectPane(SAME_VIEWS, SAME, {
+      connect(view) {
+        connected += 1
+        if (connected === 2) release()
+        return bothConnected.then(() => probeSession(view.id, closed))
+      },
+      send(session) {
+        return session.id === 'pane-visible'
+          ? Promise.resolve({ data: 'discarded' })
+          : new Promise(() => {})
+      },
+      sleep() {
+        return slowSleep(10)
+      },
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('HUNG'), 500)),
+  ])
+
+  assert.notEqual(outcome, 'HUNG')
+  assert.equal(outcome.pane.id, 'pane-visible')
+  assert.deepEqual(closed.sort(), ['pane-hidden', 'pane-visible'])
+})
+
+/** Deps for readWindows that serve the shell read and the webview probes. */
+function probeShellDeps({ shells, completers = [], closed = [] }) {
+  return {
+    async connect(target) {
+      if (target.type === 'page') return { targetId: target.id, close() {} }
+      return probeSession(target.id, closed)
+    },
+    async evaluate(session) {
+      return JSON.stringify(shells[session.targetId] ?? {})
+    },
+    send(session) {
+      return completers.includes(session.id)
+        ? Promise.resolve({ data: 'discarded' })
+        : new Promise(() => {})
+    },
+    sleep() {
+      return slowSleep(5)
+    },
+  }
+}
+
+test('readWindows disambiguates identical URLs by the completing capture', async () => {
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    probeShellDeps({ shells: SAME_SHELL, completers: ['pane-visible'] }),
+  )
+
+  assert.equal(windows[0].pane.id, 'pane-visible')
+  assert.equal(windows[0].paneError, null)
+})
+
+test('readWindows reports ambiguous identical URLs instead of the first target', async () => {
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    probeShellDeps({ shells: SAME_SHELL, completers: ['pane-hidden', 'pane-visible'] }),
+  )
+
+  assert.equal(windows[0].pane, null)
+  assert.equal(windows[0].paneError, 'ambiguous')
+  assert.match(windows[0].paneErrorMessage, /could not identify the browser pane/)
+})
+
+test('readWindows reports no-capture when no same-URL pane completes', async () => {
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    probeShellDeps({ shells: SAME_SHELL }),
+  )
+
+  assert.equal(windows[0].pane, null)
+  assert.equal(windows[0].paneError, 'no-capture')
+  assert.match(windows[0].paneErrorMessage, /bring this session's DSH window to the front and retry/)
+})
+
+test('readWindows does not probe a restore screen even when two views share its URL', async () => {
+  const closed = []
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    probeShellDeps({
+      shells: { 'window-1': { current: '{"sessionId":"session-1"}', address: SAME, restoring: true } },
+      completers: ['pane-visible'],
+      closed,
+    }),
+  )
+
+  assert.equal(windows[0].restoring, true)
+  assert.equal(windows[0].pane, null)
+  assert.equal(windows[0].paneError, null)
+  assert.deepEqual(closed, [])
+})
+
+test('readWindows does not probe a sole URL match', async () => {
+  let probeConnects = 0
+  const windows = await readWindows([PAGE, HIDDEN, VISIBLE], {
+    async connect(target) {
+      if (target.type === 'page') return { targetId: target.id, close() {} }
+      probeConnects += 1
+      return { id: target.id, close() {} }
+    },
+    async evaluate() {
+      return JSON.stringify({ current: '{"sessionId":"session-1"}', address: 'https://visible.example/docs/' })
+    },
+    send() {
+      return Promise.resolve({ data: 'discarded' })
+    },
+    sleep() {
+      return new Promise(() => {})
+    },
+  })
+
+  assert.equal(windows[0].pane.id, 'pane-visible')
+  assert.equal(probeConnects, 0)
 })

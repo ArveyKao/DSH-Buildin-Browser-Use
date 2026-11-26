@@ -54,6 +54,8 @@ function windowRecord({
   visiblePaneUrl,
   paneId = null,
   restoring = false,
+  paneError = null,
+  paneErrorMessage = null,
 } = {}) {
   let allViews = views
   if (allViews === undefined) {
@@ -72,6 +74,8 @@ function windowRecord({
     readError: null,
     views: allViews,
     pane: matchVisiblePane(allViews, visiblePaneUrl),
+    paneError,
+    paneErrorMessage,
   }
 }
 
@@ -236,6 +240,53 @@ test('a tool without a url fails fast when the caller view has no visible pane',
   await assert.rejects(h.tool('browser_open').execute({}, EXEC), expected)
   assert.equal(h.state.openCalls.length, 0)
   assert.equal(h.state.sleeps, 0)
+})
+
+const AMBIGUOUS_MESSAGE = "could not identify the browser pane visible in this session's view: several same-URL panes completed a frame capture; bring this session's DSH window to the front and retry"
+
+test('an unidentifiable same-URL pane fails clearly, without the browser_open retry hint', async () => {
+  const h = harness({
+    windows: [windowRecord({
+      views: [],
+      visiblePaneUrl: 'https://same.example/',
+      paneError: 'ambiguous',
+      paneErrorMessage: AMBIGUOUS_MESSAGE,
+    })],
+  })
+
+  await assert.rejects(h.tool('browser_snapshot').execute({}, EXEC), (error) => {
+    assert.equal(error.message, AMBIGUOUS_MESSAGE)
+    assert.doesNotMatch(error.message, /call browser_open/)
+    return true
+  })
+  // browser_open cannot resolve an ambiguity: it must fail before the opener.
+  await assert.rejects(h.tool('browser_open').execute({ url: 'https://same.example/' }, EXEC), (error) => {
+    assert.equal(error.message, AMBIGUOUS_MESSAGE)
+    assert.doesNotMatch(error.message, /call browser_open/)
+    return true
+  })
+  assert.equal(h.state.openCalls.length, 0)
+  assert.equal(h.state.connectedTargets.length, 0)
+})
+
+test('browser_targets and browser_scope_probe report the pane error kind', async () => {
+  const h = harness({
+    windows: [windowRecord({
+      views: [],
+      visiblePaneUrl: 'https://same.example/',
+      paneError: 'no-capture',
+      paneErrorMessage: "could not identify the browser pane visible in this session's view",
+    })],
+  })
+
+  const targets = JSON.parse(await h.tool('browser_targets').execute({}, EXEC))
+  assert.equal(targets.windows[0].paneError, 'no-capture')
+  assert.equal(targets.windows[0].paneTargetId, null)
+
+  const probe = JSON.parse(await h.tool('browser_scope_probe').execute({}, EXEC))
+  assert.equal(probe.paneError, 'no-capture')
+  assert.equal(probe.windows[0].paneError, 'no-capture')
+  assert.equal(probe.chosenPane, null)
 })
 
 test('browser_navigate lets a fresh pane load the url through the address bar', async () => {
