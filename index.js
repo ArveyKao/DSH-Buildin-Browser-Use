@@ -17,7 +17,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { connect, evaluate, fetchTargets, pressKey, sleep } from './lib/cdp.js'
 import { clickScript, openInSystemBrowser, openPaneInWindow, SNAPSHOT_SCRIPT, typeScript } from './lib/ops.js'
@@ -39,7 +39,7 @@ const DEFAULT_ENDPOINT = 'http://127.0.0.1:9222'
  * @param config - optional `{ cdpEndpoint }` from the bundle patch.
  */
 export function apply(ctx, config = {}) {
-  const endpoint = typeof config.cdpEndpoint === 'string' ? config.cdpEndpoint : DEFAULT_ENDPOINT
+  const endpoint = typeof config?.cdpEndpoint === 'string' ? config.cdpEndpoint : DEFAULT_ENDPOINT
 
   /** Resolve the calling Session, its workspace, windows and chosen pane. */
   async function resolveScope(exec) {
@@ -75,13 +75,13 @@ export function apply(ctx, config = {}) {
     return { session, workspace, sessionIds, titles, targets, windows, choice }
   }
 
-  /** Open a pane in the caller's own window and wait for its page target. */
-  async function openPaneInCallerWindow(scope, url) {
+  /** Open a pane in the window chosen for this workspace and wait for its page target. */
+  async function openPaneInCallerWindow(scope) {
     const window = scope.choice.callerWindow
     if (window === null) {
-      throw new Error(`cannot determine this Session's window: ${scope.choice.reason}`)
+      throw new Error(`cannot open a workspace browser: ${scope.choice.reason}`)
     }
-    await openPaneInWindow(window.page, url)
+    await openPaneInWindow(window.page)
     for (let i = 0; i < 25; i += 1) {
       await sleep(300)
       const targets = await fetchTargets(endpoint)
@@ -94,20 +94,43 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Run a callback against the workspace pane, opening one in the caller's window
-   * when the workspace has none yet.
+   * Resolve the pane for one call: the workspace pane by default, or an explicit
+   * `targetId` that must name a webview pane of this workspace. Opens a pane in
+   * the workspace's window when none exists yet.
    */
-  async function withPane(exec, args, openUrl, callback) {
+  function resolvePane(scope, targetId) {
+    if (targetId === undefined) return scope.choice.chosen
+
+    const target = scope.targets.find((candidate) => candidate.id === targetId)
+    if (target === undefined) {
+      throw new Error(`no CDP target with id ${targetId}; call browser_targets to list targets`)
+    }
+    if (target.type !== 'webview') {
+      throw new Error(`CDP target ${targetId} is a ${target.type}, not a browser pane`)
+    }
+    const host = scope.windows.find((win) => win.pageTargetId === target.parentId)
+    if (typeof host?.currentSessionId === 'string' && !scope.sessionIds.includes(host.currentSessionId)) {
+      throw new Error(
+        `CDP target ${targetId} is hosted by another workspace's window; refusing to cross workspaces`,
+      )
+    }
+    return target
+  }
+
+  /**
+   * Run a callback against the workspace pane, opening one when needed.
+   * @param exec - tool execution context (carries the calling Session).
+   * @param args - tool arguments; `targetId` overrides the workspace pane.
+   * @param callback - `(cdpSession, { pane, workspace }) => value`.
+   */
+  async function withPane(exec, args, callback) {
     const scope = await resolveScope(exec)
     if (scope.workspace === undefined) {
       throw new Error('this Session is not attached to a workspace yet, so no workspace browser exists')
     }
 
-    let pane = args.targetId === undefined
-      ? scope.choice.chosen
-      : scope.targets.find((target) => target.id === args.targetId) ?? null
-
-    if (pane === null) pane = await openPaneInCallerWindow(scope, openUrl)
+    let pane = resolvePane(scope, args.targetId)
+    if (pane === null) pane = await openPaneInCallerWindow(scope)
 
     // A pane lives in a window, and that window's Session can change to one from
     // another workspace. Bind the pane to the workspace that first used it and
@@ -215,6 +238,7 @@ export function apply(ctx, config = {}) {
           : { id: scope.choice.chosen.id, url: scope.choice.chosen.url, title: scope.choice.chosen.title },
         matchedBy: scope.choice.matchedBy,
         reason: scope.choice.reason,
+        callerWindowId: scope.choice.callerWindow?.pageTargetId ?? null,
       }
       return JSON.stringify(report, null, 2)
     },
@@ -223,14 +247,17 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(textTool({
     name: 'browser_open',
     description: 'Open the workspace browser, optionally loading a URL. Reuses the pane another Session '
-      + 'of this workspace opened; otherwise opens one in the calling Session\'s own window.',
+      + 'of this workspace opened; otherwise opens one in a DSH window of this workspace.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Optional URL to load after opening.' } },
       additionalProperties: false,
     },
     async execute(args, exec) {
-      const result = await withPane(exec, args, args.url, async (session, { pane }) => {
+      if (args.url !== undefined && (typeof args.url !== 'string' || args.url.length === 0)) {
+        throw new Error('url must be a non-empty string')
+      }
+      const result = await withPane(exec, args, async (session, { pane }) => {
         if (args.url !== undefined) {
           await session.send('Page.enable').catch(() => {})
           await session.send('Page.navigate', { url: args.url })
@@ -240,9 +267,9 @@ export function apply(ctx, config = {}) {
           session,
           'JSON.stringify({ url: location.href, title: document.title })',
         )
-        return `${pane.id} ${info}`
+        return { paneId: pane.id, info }
       })
-      return `Pane ${result.value} | cookies restored: ${result.restored}, persisted: ${result.persisted}`
+      return `Pane ${result.value.paneId} ${result.value.info} | cookies restored: ${result.restored}, persisted: ${result.persisted}`
     },
   }))
 
@@ -252,7 +279,7 @@ export function apply(ctx, config = {}) {
       + 'implicit for every other browser tool.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
-      const result = await withPane(exec, args, undefined, async (session, { pane }) => {
+      const result = await withPane(exec, args, async (session, { pane }) => {
         const info = await evaluate(session, 'JSON.stringify({ url: location.href, title: document.title })')
         return `${pane.id} ${info}`
       })
@@ -262,7 +289,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register(textTool({
     name: 'browser_navigate',
-    description: 'Navigate the workspace pane to a URL. Opens a pane in the calling Session\'s window '
+    description: 'Navigate the workspace pane to a URL. Opens a pane in the workspace\'s window '
       + 'when the workspace has none.',
     parameters: {
       type: 'object',
@@ -271,7 +298,7 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.url !== 'string' || args.url.length === 0) throw new Error('url is required')
-      const result = await withPane(exec, args, args.url, async (session) => {
+      const result = await withPane(exec, args, async (session) => {
         await session.send('Page.enable').catch(() => {})
         const nav = await session.send('Page.navigate', { url: args.url })
         await sleep(1200)
@@ -279,14 +306,15 @@ export function apply(ctx, config = {}) {
         if (typeof errorText === 'string' && errorText.length > 0) {
           // VPN/proxy-only hosts are unreachable from the app's network context.
           await openInSystemBrowser(args.url)
-          return JSON.stringify({ url: args.url, unreachableInPane: errorText, handedToSystemBrowser: true })
+          return { handedToSystemBrowser: true, errorText }
         }
-        return evaluate(session, 'JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })')
+        const info = await evaluate(session, 'JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })')
+        return { handedToSystemBrowser: false, info }
       })
-      if (result.value.includes('handedToSystemBrowser')) {
-        return `The pane could not reach ${args.url} (${result.value}); opened it in your own browser instead.`
+      if (result.value.handedToSystemBrowser) {
+        return `The pane could not reach ${args.url} (${result.value.errorText}); opened it in your own browser instead.`
       }
-      return `Navigated ${result.pane.id}: ${result.value} | cookies restored: ${result.restored}, persisted: ${result.persisted}`
+      return `Navigated ${result.pane.id}: ${result.value.info} | cookies restored: ${result.restored}, persisted: ${result.persisted}`
     },
   }))
 
@@ -313,7 +341,7 @@ export function apply(ctx, config = {}) {
     description: 'Read the workspace pane: URL, title, visible text, links and form fields.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
-      const result = await withPane(exec, args, undefined, async (session) => evaluate(session, SNAPSHOT_SCRIPT))
+      const result = await withPane(exec, args, async (session) => evaluate(session, SNAPSHOT_SCRIPT))
       return result.value
     },
   }))
@@ -328,7 +356,7 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.selector !== 'string') throw new Error('selector is required')
-      const result = await withPane(exec, args, undefined, async (session) => {
+      const result = await withPane(exec, args, async (session) => {
         const outcome = await evaluate(session, clickScript(args.selector))
         await sleep(600)
         return String(outcome)
@@ -352,7 +380,8 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.selector !== 'string') throw new Error('selector is required')
-      const result = await withPane(exec, args, undefined, async (session) => {
+      if (args.text !== undefined && typeof args.text !== 'string') throw new Error('text must be a string')
+      const result = await withPane(exec, args, async (session) => {
         const outcome = await evaluate(session, typeScript(args.selector, args.text ?? ''))
         if (outcome === 'typed' && args.submit === true) {
           await pressKey(session, { key: 'Enter', code: 'Enter', virtualKeyCode: 13, text: '\r' })
@@ -374,8 +403,9 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       if (typeof args.expression !== 'string') throw new Error('expression is required')
-      const result = await withPane(exec, args, undefined, async (session) => {
+      const result = await withPane(exec, args, async (session) => {
         const value = await evaluate(session, args.expression)
+        if (value === undefined) return 'undefined'
         return typeof value === 'string' ? value : JSON.stringify(value)
       })
       return result.value
@@ -391,12 +421,15 @@ export function apply(ctx, config = {}) {
       additionalProperties: false,
     },
     async execute(args, exec) {
-      const result = await withPane(exec, args, undefined, async (session) => {
+      if (args.filePath !== undefined && (typeof args.filePath !== 'string' || args.filePath.length === 0)) {
+        throw new Error('filePath must be a non-empty string')
+      }
+      const result = await withPane(exec, args, async (session) => {
         const shot = await session.send('Page.captureScreenshot', { format: 'png' })
         const path = typeof args.filePath === 'string'
           ? args.filePath
           : join(homedir(), '.dsh', 'browser-state', 'shots', `shot-${Date.now()}.png`)
-        await mkdir(join(path, '..'), { recursive: true })
+        await mkdir(dirname(path), { recursive: true })
         await writeFile(path, Buffer.from(shot.data, 'base64'))
         return path
       })

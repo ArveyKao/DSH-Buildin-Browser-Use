@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "description": "Workspace-scoped built-in browser control for DSH Desktop over CDP",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
@@ -15,7 +21,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "docs",
-    "icon.svg"
+    "icon.svg",
+    "!tests/**"
   ],
   "dsh": {
     "bundle": {
