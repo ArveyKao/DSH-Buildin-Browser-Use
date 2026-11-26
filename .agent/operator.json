@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "applicability": "not_applicable",
+  "scope": "local DSH plugin bundle; no project-owned service",
+  "reason": "Artifact is loaded by the user-operated DSH Desktop app; verification is command receipts plus live CDP smoke, no background runtime to monitor",
+  "updated_at": "2026-11-26T03:52:47Z"
+}
