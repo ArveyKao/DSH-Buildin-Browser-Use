@@ -1,0 +1,25 @@
+{
+  "attempt_id": "run_94f7489071864181a9c246fcf968e456",
+  "at": "2026-11-26T14:22:10.375Z",
+  "done_check": "node --check index.js && for f in lib/*.js; do node --check \"$f\"; done && node --test",
+  "passed": true,
+  "results": [
+    {
+      "command": "node --check index.js && for f in lib/*.js; do node --check \"$f\"; done && node --test",
+      "exit_code": 0,
+      "timed_out": false,
+      "output_tail": "dow with no pane (0.047375ms)\n✔ chooseCallerPane ignores titles while any window yields a session id (0.038917ms)\n✔ chooseCallerPane title fallback misses when no window is titled for the caller (0.036667ms)\n✔ windowSessionTitle strips only the product suffix (0.046667ms)\n✔ sessionTitle reads the latest title event (0.060333ms)\n✔ describeTargets maps each page to the webview pane it hosts (0.104958ms)\n✔ workspaceKey is a stable 16-hex digest of workspace identity (1.566375ms)\n✔ workspaceStatePath lives under the per-workspace state directory (0.111542ms)\n✔ snapshot then restore round-trips cookies for one workspace (15.92325ms)\n✔ restore runs once per process for a workspace (1.212459ms)\n✔ a failed setCookies is retried instead of being marked restored (2.197375ms)\n✔ cookie files are isolated per workspace (1.029875ms)\n✔ a malformed snapshot never overwrites an existing cookie file (1.246542ms)\n✔ an empty cookie list is persisted as a real empty snapshot (0.72425ms)\n✔ a corrupt cookie file loads as empty (0.647375ms)\n✔ cookie files are written with private permissions (0.731041ms)\n✔ parseCurrentSession reads the session bridge value (0.841625ms)\n✔ parseCurrentSession rejects unusable values (0.271667ms)\n✔ window shell returns the visible address-bar value with the session id (1.753958ms)\n✔ window shell reports a visible Restore page screen (1.841708ms)\n✔ window shell ignores hidden or inexact Restore page affordances (1.744917ms)\n✔ window shell skips hidden-only address bars (0.774583ms)\n✔ window shell keeps an empty visible bar empty (0.331416ms)\n✔ parseWindowShell maps an empty bar to a null visible URL (0.102167ms)\n✔ parseWindowShell reports the restore screen only for a true flag (0.0565ms)\n✔ parseVisiblePaneUrl trims and rejects empty values (0.080833ms)\n✔ readWindows picks the URL-matched webview, not the first one (0.262458ms)\n✔ readWindows has no first-webview fallback when the visible bar matches no view (0.065959ms)\n✔ readWindows reports a restore screen (bar value, no webview) as no pane (0.070041ms)\n✔ readWindows reports the restore screen and ignores a coincidental URL match (0.059709ms)\n✔ readWindows without a restore screen still matches that same URL (0.060166ms)\n✔ readWindows clears the visible URL when only a hidden bar exists (0.046417ms)\n✔ readWindows maps an empty visible bar to a null URL (0.039584ms)\n✔ readWindows evaluates once per window and keeps views per window (0.068625ms)\n✔ readWindows reports a shell read error and chooses no pane (0.1055ms)\n✔ CAPTURE_PROBE_TIMEOUT_MS exports the documented 2.5s bound (0.018917ms)\n✔ probeCaptureCompletion reports a completing 1×1 PNG capture and closes its session (0.157584ms)\n✔ probeCaptureCompletion returns false at the cap and still closes the session (0.057417ms)\n✔ probeCaptureCompletion treats a throwing send as no capture and closes (0.066625ms)\n✔ probeCaptureCompletion treats a rejecting send as no capture and closes (0.060458ms)\n✔ probeCaptureCompletion treats a connect error as no capture (0.035541ms)\n✔ selectPane chooses a sole URL match without probing (0.092208ms)\n✔ selectPane reports no pane and no error when no webview matches the bar (0.064417ms)\n✔ selectPane picks the one same-URL pane whose capture completes (10.878875ms)\n✔ selectPane reports no-capture when no same-URL pane completes, never a guess (0.191833ms)\n✔ selectPane reports ambiguous when several same-URL panes complete (0.105ms)\n✔ selectPane probes same-URL candidates in parallel (10.842458ms)\n✔ readWindows disambiguates identical URLs by the completing capture (6.676667ms)\n✔ readWindows reports ambiguous identical URLs instead of the first target (0.17375ms)\n✔ readWindows reports no-capture when no same-URL pane completes (6.590292ms)\n✔ readWindows does not probe a restore screen even when two views share its URL (0.119666ms)\n✔ readWindows does not probe a sole URL match (0.082625ms)\nℹ tests 118\nℹ suites 0\nℹ pass 118\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 629.909875\n"
+    }
+  ],
+  "files": [
+    "README.md",
+    "docs/DETAIL.md",
+    "index.js",
+    "lib/scope.js",
+    "lib/windows.js",
+    "tests/pane.test.js",
+    "tests/scope.test.js",
+    "tests/windows.test.js"
+  ],
+  "out_of_scope": []
+}

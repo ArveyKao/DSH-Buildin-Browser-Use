@@ -1,0 +1,800 @@
+diff --git a/README.md b/README.md
+index 4ff46df..0e68256 100644
+--- a/README.md
++++ b/README.md
+@@ -5,7 +5,8 @@ tools to drive DSH's built-in browser pane over the Chrome DevTools Protocol (CD
+ 
+ DSH keeps one browser pane **per session view**. The plugin drives the pane that
+ is VISIBLE in the calling Session's own view: it matches the window's visible
+-address-bar URL against that window's webview targets, and `browser_open` /
++address-bar URL against that window's webview targets (telling apart several
++same-URL panes by which one produces animation frames), and `browser_open` /
+ `browser_navigate` load the URL through that visible bar. Other sessions'
+ webviews (alive but hidden) are never driven. A view restored from a previous
+ process shows a "Restore page" screen with a stale bar and no pane of its own;
+@@ -33,8 +34,9 @@ therefore map it to the pane visible in its own view.
+   value and whether a "Restore page" affordance is mounted. The caller's window
+   decides which view belongs to the caller, and the bar URL is normalized and
+   matched against every webview in that window. There is no first-webview
+-  fallback: an unmatched bar means no visible pane yet. Window-title matching is
+-  only a fallback when no window yields a session id.
++  fallback: an unmatched bar means no visible pane yet, and several matches are
++  resolved by frame production (next bullet). Window-title matching is only a
++  fallback when no window yields a session id.
+ - **Restore screens report no pane.** A view whose pane was loaded in a previous
+   DSH process reopens on a "Previously opened / <title> / Restore page" screen:
+   its address bar is mounted and pre-filled with the OLD URL, but the view has
+@@ -57,9 +59,16 @@ therefore map it to the pane visible in its own view.
+   changed. A hidden view that already showed that URL is never taken.
+ - **Explicit `targetId` must be the caller's own pane.** An unknown id, a non-pane
+   target, or another webview (even in the same window) is refused.
+-- **Identical URLs are indistinguishable.** Two views showing the exact same URL
+-  cannot be told apart by URL, so the first matching webview is used. Restore
+-  screens are the exception: their stale bar never identifies a live pane.
++- **Identical URLs are told apart by frame production.** When two or more
++  webviews in the window match the visible bar's exact URL, each is probed
++  in-page with a bounded animation-frame race (rAF against a 600ms
++  `setTimeout`); only the displayed view's webview produces frames, and the sole
++  producer is driven. The probe costs ~600ms and only when the URL is ambiguous;
++  a single match is taken without probing. Zero producers (the DSH window is
++  not in the foreground) or several producers fail the call with "the visible
++  one could not be identified; bring this session's DSH window to the front and
++  retry" instead of guessing. Restore screens are exempt: their stale bar never
++  identifies a live pane.
+ - **Not displayed, no pane.** A Session shown in no open window gets a clear
+   error: switch to it in a DSH window first.
+ - **Screenshots are bounded.** `Page.captureScreenshot` never completes on a
+@@ -133,8 +142,12 @@ order and failure behavior: [docs/DETAIL.md](docs/DETAIL.md).
+   processes — a developer-machine setting, not a shared-host one.
+ - Each session drives the pane visible in its own view; other views' webviews are
+   never touched. Calls within the same view are not locked against each other.
+-- Two views showing the identical URL are indistinguishable by URL; the first
+-  matching webview is used. A restore screen's stale bar never matches.
++- Two views showing the identical URL are disambiguated by frame production:
++  only the displayed view's pane produces animation frames, so it is driven at a
++  ~600ms probe cost that applies only in that ambiguous case. If none (window
++  not in the foreground) or several produce frames, the call fails and asks you
++  to bring that DSH window to the front. A restore screen's stale bar never
++  matches.
+ - No HTTP-cache persistence and no pane mirroring. The cookie jar itself is
+   app-wide; only the snapshot files stay per workspace.
+ - Pane tools other than `browser_open` / `browser_navigate` need a visible pane.
+@@ -149,8 +162,9 @@ node --test
+ ```
+ 
+ `node --test` runs the unit tests for per-view pane selection, visible-bar URL
+-matching, restore-screen detection (shell read and opener), the screenshot
+-timeout and cookie state (no browser, no network).
++matching, same-URL frame-probe disambiguation (including probe-session closure
++and the zero/multiple-producer errors), restore-screen detection (shell read and
++opener), the screenshot timeout and cookie state (no browser, no network).
+ 
+ ## License
+ 
+diff --git a/docs/DETAIL.md b/docs/DETAIL.md
+index 754c265..ec41983 100644
+--- a/docs/DETAIL.md
++++ b/docs/DETAIL.md
+@@ -3,13 +3,14 @@
+ DSH keeps one browser pane **per session view**, not one per window. The plugin
+ drives the pane that is VISIBLE in the calling Session's own view: it reads the
+ window's visible address-bar URL, matches it against that window's webview
+-targets, and loads `browser_open` / `browser_navigate` URLs through that same
+-visible bar. Other sessions' webviews stay alive but hidden and are never driven.
+-A view restored from a previous process shows a "Restore page" screen whose bar
+-is stale and which owns no webview; the opener restores it before loading.
+-The plugin is a native Host cordis bundle (`export function apply(ctx)`), so it
+-can see the calling Session; it drives DSH's built-in browser over CDP. Cookie
+-snapshots remain per workspace (see below).
++targets (using frame production to tell apart several panes showing the same
++URL), and loads `browser_open` / `browser_navigate` URLs through that same
++visible bar. Other sessions' webviews stay alive but hidden and are never
++driven. A view restored from a previous process shows a "Restore page" screen
++whose bar is stale and which owns no webview; the opener restores it before
++loading. The plugin is a native Host cordis bundle (`export function apply(ctx)`),
++so it can see the calling Session; it drives DSH's built-in browser over CDP.
++Cookie snapshots remain per workspace (see below).
+ 
+ ## Tool set
+ 
+@@ -53,21 +54,36 @@ authoritative. Within it:
+ 
+ - `views` is every `webview` target whose `parentId` is that window's page
+   target — all session views' webviews, visible or hidden.
+-- `pane` is `matchVisiblePane(views, visiblePaneUrl)`: both URLs are normalized
+-  with `URL` (host case folded, a trailing `/` dropped from a non-root path) and
+-  the first matching webview wins. Null/empty/invalid URLs match nothing.
++- `pane` is derived from the visible-bar URL: both URLs are normalized with
++  `URL` (host case folded, a trailing `/` dropped from a non-root path) and
++  every webview matching it is collected. One match is taken as-is. Null, empty
++  or invalid URLs match nothing.
++- **Several matches are disambiguated by frame production.** When two or more
++  webviews match the same URL, each candidate is probed by connecting to its
++  webview target and evaluating a bounded in-page race: `requestAnimationFrame`
++  against a 600ms `setTimeout`, resolving `'raf-fired'` or `'raf-timeout'`.
++  Only the displayed view's webview produces animation frames; hidden panes
++  produce none (`document.visibilityState` still reports `'visible'` there, and
++  geometry is identical, so neither can be used). The sole frame-producing
++  candidate is the pane; every probe session is closed. The probe applies only
++  in this ambiguous case, so a normal single-match call costs no extra time and
++  the ambiguous case pays ~600ms.
++- **Unidentifiable visible pane fails clearly.** Zero frame producers (the DSH
++  window is minimized/occluded, or the probe could not run) sets
++  `paneError: 'no-frames'`; two or more sets `paneError: 'ambiguous'`. Either
++  way `pane` is `null`, a `paneErrorMessage` explains it, and no pane tool runs
++  — there is no first-match fallback and no misleading "call browser_open" hint.
++  The message asks you to bring this session's DSH window to the front and
++  retry.
+ - There is **no first-webview fallback**. A bar value with no matching webview
+   means no visible pane yet, even when the window hosts other views' hidden
+   webviews.
+-- When `restoring` is true, `pane` is `null` **regardless of any URL match**.
+-  The bar belongs to a restore screen ("Previously opened / <title> / Restore
+-  page") for a pane loaded in a previous process: it is pre-filled with the OLD
+-  URL and the view has no webview of its own yet. That stale value must never
+-  pick another view's webview just because the URLs coincide. `visiblePaneUrl`
+-  and `views` are still reported.
+-- **Identical URLs are indistinguishable.** If two views show the exact same
+-  URL, the first matching webview is used; URL matching cannot tell them apart.
+-  Restore screens are exempt because they never match.
++- When `restoring` is true, `pane` is `null` **regardless of any URL match**,
++  and no probe is attempted. The bar belongs to a restore screen ("Previously
++  opened / <title> / Restore page") for a pane loaded in a previous process: it
++  is pre-filled with the OLD URL and the view has no webview of its own yet.
++  That stale value must never pick another view's webview just because the URLs
++  coincide. `visiblePaneUrl` and `views` are still reported.
+ 
+ Matching by window title (`<session title> — DeepSeek Harness`) is kept only as a
+ fallback for builds where no window yields a stored session id.
+@@ -127,8 +143,11 @@ normally. This avoids loading the URL twice.
+ - A view showing a restore screen reports `restoring: true` and no pane; its
+   stale bar is never matched, even against an identical URL. Opening clicks
+   "Restore page" first so the view's own pane spawns.
+-- Two views showing the identical URL are indistinguishable by URL; the first
+-  matching webview is used. Restore screens never match.
++- Two views showing the identical URL are disambiguated by frame production: the
++  sole pane producing animation frames is driven (a bounded rAF-vs-600ms race
++  that runs only in this ambiguous case). Zero or several producers fail the
++  call and ask you to bring the DSH window to the front. Restore screens never
++  match and are never probed.
+ - A Session that is not displayed in any open window cannot be routed to a pane.
+   The call fails with "this session is not displayed in any open window; switch
+   to it in a DSH window first".
+@@ -169,6 +188,11 @@ tool output shows `persisted: -1` and a failed restore shows
+   that never appears.
+ - A restore screen that never resolves fails with "the restored browser pane did
+   not finish restoring" instead of typing into the stale bar.
++- A window whose visible pane cannot be identified among several same-URL panes
++  fails every pane tool with the frame-probe message ("several panes … the
++  visible one could not be identified; bring this session's DSH window to the
++  front and retry") instead of the no-pane "call browser_open" hint, and no
++  pane is driven or opened.
+ - A screenshot on a hidden pane fails after 15s with the switch-session message
+   instead of hanging.
+ - Read errors for individual windows are reported in `browser_targets` /
+diff --git a/index.js b/index.js
+index 9bbfd21..e9ee64d 100644
+--- a/index.js
++++ b/index.js
+@@ -6,6 +6,9 @@
+  * is visible. The tools therefore drive the pane VISIBLE in the caller's view:
+  * the window's visible address-bar URL is matched against that window's webview
+  * targets, and `browser_open` loads the URL through the caller's visible bar.
++ * Several webviews matching that URL are told apart by frame production: only
++ * the displayed view's pane produces animation frames, and when none can be
++ * identified the call fails instead of driving a hidden pane.
+  * Other session views' webviews are never driven. A view restored from a
+  * previous process shows a "Restore page" screen whose bar is stale and which
+  * owns no webview; `browser_open` trusted-clicks Restore page first. A Session
+@@ -113,6 +116,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
+       webviewCount: win.views.length,
+       paneTargetId: win.pane?.id ?? null,
+       paneUrl: win.pane?.url ?? null,
++      paneError: win.paneError ?? null,
++      paneErrorMessage: win.paneErrorMessage ?? null,
+       showsCaller: win.currentSessionId === scope.session.id,
+       workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
+     }))
+@@ -193,6 +198,16 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
+       throw new Error('this Session is not attached to a workspace yet, so cookies cannot be stored')
+     }
+ 
++    // Several panes show the visible bar's URL and frame production could not
++    // single out the displayed one: never drive (or open through) a guess.
++    const paneError = scope.choice.callerWindow?.paneError
++    if (paneError) {
++      throw new Error(
++        scope.choice.callerWindow.paneErrorMessage
++          ?? 'the pane visible in this session\'s view could not be identified among several panes showing the same URL; bring this session\'s DSH window to the front and retry',
++      )
++    }
++
+     let pane = resolvePane(scope, args.targetId)
+     let opened = false
+     if (pane === null) {
+diff --git a/lib/scope.js b/lib/scope.js
+index ff39014..cb3464d 100644
+--- a/lib/scope.js
++++ b/lib/scope.js
+@@ -83,23 +83,37 @@ function normalizePaneUrl(value) {
+   return url.href
+ }
+ 
++/**
++ * Every webview whose URL matches the visible address-bar URL, in view order.
++ *
++ * More than one candidate means the URL alone cannot identify the caller's
++ * pane; `lib/windows.js` then disambiguates by which webview produces frames.
++ *
++ * @param views - all webview targets hosted by the window.
++ * @param visiblePaneUrl - value of the window's visible address bar (may be null).
++ * @returns all matching webviews (empty when nothing matches).
++ */
++export function matchVisiblePaneCandidates(views, visiblePaneUrl) {
++  const wanted = normalizePaneUrl(visiblePaneUrl)
++  if (wanted === null || !Array.isArray(views)) return []
++  return views.filter((view) => normalizePaneUrl(view?.url) === wanted)
++}
++
+ /**
+  * Match the visible address-bar URL to one of a window's webview targets.
+  *
+  * The visible bar belongs to the session view the user is looking at, so its URL
+- * identifies the caller's webview even when other views' webviews exist.
++ * identifies the caller's webview even when other views' webviews exist. This
++ * first-match helper is unambiguous only when the URL matches exactly one
++ * webview; `lib/windows.js` uses `matchVisiblePaneCandidates` to detect the
++ * same-URL case instead of guessing.
+  *
+  * @param views - all webview targets hosted by the window.
+  * @param visiblePaneUrl - value of the window's visible address bar (may be null).
+  * @returns the first webview whose URL matches, or null.
+  */
+ export function matchVisiblePane(views, visiblePaneUrl) {
+-  const wanted = normalizePaneUrl(visiblePaneUrl)
+-  if (wanted === null || !Array.isArray(views)) return null
+-  for (const view of views) {
+-    if (normalizePaneUrl(view?.url) === wanted) return view
+-  }
+-  return null
++  return matchVisiblePaneCandidates(views, visiblePaneUrl)[0] ?? null
+ }
+ 
+ /**
+@@ -127,6 +141,14 @@ export function chooseCallerPane(windows, options) {
+         reason: "pane visible in the caller's session view",
+       }
+     }
++    if (ownWindow.paneError) {
++      return {
++        chosen: null,
++        callerWindow: ownWindow,
++        matchedBy: 'session-id',
++        reason: ownWindow.paneErrorMessage ?? "the visible pane in this window could not be identified",
++      }
++    }
+     return {
+       chosen: null,
+       callerWindow: ownWindow,
+@@ -148,7 +170,7 @@ export function chooseCallerPane(windows, options) {
+           matchedBy: 'title',
+           reason: titled.pane
+             ? 'pane visible in the window titled for this session (session id unavailable)'
+-            : 'the window titled for this session has no visible pane yet',
++            : titled.paneErrorMessage ?? 'the window titled for this session has no visible pane yet',
+         }
+       }
+     }
+diff --git a/lib/windows.js b/lib/windows.js
+index 65bd949..02dbe78 100644
+--- a/lib/windows.js
++++ b/lib/windows.js
+@@ -13,17 +13,41 @@
+  * therefore reads both the stored Session id and the VISIBLE address bar's
+  * value, plus whether the view is showing the restore screen of a pane loaded in
+  * a previous process. That URL identifies which webview target the user is
+- * looking at; `matchVisiblePane` picks it from all webviews parented to the
+- * window. A restore screen's bar is stale (it names no live pane of this view),
+- * so such a window reports no pane.
++ * looking at when it matches exactly one webview; several matches are
++ * disambiguated by which pane produces animation frames (see `selectPane`). A
++ * restore screen's bar is stale (it names no live pane of this view), so such a
++ * window reports no pane.
+  */
+ 
+ import { connect, evaluate } from './cdp.js'
+-import { matchVisiblePane } from './scope.js'
++import { matchVisiblePaneCandidates } from './scope.js'
+ 
+ /** Key the DSH shell writes the displayed Session id to. */
+ const CURRENT_SESSION_KEY = 'dsh.sessions.current'
+ 
++/** Upper bound of the in-page frame probe; a hidden pane settles on the timer. */
++export const FRAME_PROBE_TIMEOUT_MS = 600
++
++/**
++ * Frames come only from the displayed webview (hidden panes still report
++ * `visibilityState: 'visible'`), and setTimeout fires everywhere, so the race
++ * settles in-page instead of relying on a CDP call that can hang.
++ */
++export const FRAME_PROBE_SCRIPT = `new Promise((resolve) => {
++  let settled = false
++  const timer = setTimeout(() => {
++    if (settled) return
++    settled = true
++    resolve('raf-timeout')
++  }, ${FRAME_PROBE_TIMEOUT_MS})
++  requestAnimationFrame(() => {
++    if (settled) return
++    settled = true
++    clearTimeout(timer)
++    resolve('raf-fired')
++  })
++})`
++
+ /**
+  * One shell evaluate per window: stored Session id, the visible address bar's
+  * value, and whether a visible "Restore page" affordance is mounted. Hidden
+@@ -115,6 +139,66 @@ export async function readWindowShell(page, deps = {}) {
+   }
+ }
+ 
++/**
++ * Whether one webview's page produces animation frames, i.e. is the displayed
++ * view's pane. A probe that cannot run counts as no frames: ambiguity then
++ * fails clearly instead of ever falling back to a hidden pane.
++ *
++ * @param view - webview CDP target to probe.
++ * @param deps - injectable `connect`/`evaluate` (tests); production defaults.
++ */
++export async function probeFrameProduction(view, deps = {}) {
++  const connectFn = deps.connect ?? connect
++  const evaluateFn = deps.evaluate ?? evaluate
++  let session
++  try {
++    session = await connectFn(view)
++    return (await evaluateFn(session, FRAME_PROBE_SCRIPT)) === 'raf-fired'
++  } catch {
++    return false
++  } finally {
++    session?.close()
++  }
++}
++
++/** Human message for a window whose visible pane could not be identified. */
++function paneFailureMessage(kind, visiblePaneUrl) {
++  const shown = visiblePaneUrl ?? 'the same address'
++  if (kind === 'no-frames') {
++    return `several panes in this window show ${shown} but none is producing animation frames, `
++      + 'so the visible one could not be identified; bring this session\'s DSH window to the '
++      + 'front and retry'
++  }
++  return `several panes in this window show ${shown} and more than one is producing animation `
++    + 'frames, so the visible one could not be identified; bring this session\'s DSH window to '
++    + 'the front and retry'
++}
++
++/**
++ * Choose the pane of one window. A restoring view and a URL matching no webview
++ * both yield no pane and no error (unchanged paths). One match is taken without
++ * probing; several matches are disambiguated by frame production, and any
++ * outcome other than exactly one producer is reported as an error, never as a
++ * first-match guess.
++ */
++async function selectPane(views, shell, deps) {
++  const none = { pane: null, paneError: null, paneErrorMessage: null }
++  if (shell.restoring) return none
++
++  const candidates = matchVisiblePaneCandidates(views, shell.visiblePaneUrl)
++  if (candidates.length === 0) return none
++  if (candidates.length === 1) return { ...none, pane: candidates[0] }
++
++  const frames = await Promise.all(
++    candidates.map((candidate) => probeFrameProduction(candidate, deps)),
++  )
++  const producing = candidates.filter((_candidate, index) => frames[index])
++  if (producing.length === 1) return { ...none, pane: producing[0] }
++
++  const paneError = producing.length === 0 ? 'no-frames' : 'ambiguous'
++  return { pane: null, paneError, paneErrorMessage: paneFailureMessage(paneError, shell.visiblePaneUrl) }
++}
++
+ /**
+  * Group CDP targets into windows with their displayed Session, visible pane URL
+  * and the pane that URL identifies.
+@@ -123,6 +207,11 @@ export async function readWindowShell(page, deps = {}) {
+  * alive but hidden); `pane` is only ever the URL-matched view. There is no
+  * first-webview fallback: a hidden view's pane is never chosen.
+  *
++ * When the visible-bar URL matches several webviews, each is probed for frame
++ * production; only a single frame producer is `pane`. Zero or several producers
++ * leave `pane` null with a `paneError` (`'no-frames'` / `'ambiguous'`) and a
++ * human `paneErrorMessage` instead of guessing.
++ *
+  * A view showing the RESTORE screen (loaded in a previous process) has a stale
+  * address bar and no webview of its own, so its `pane` is null even when a
+  * webview URL coincidentally equals the bar value.
+@@ -144,6 +233,7 @@ export async function readWindows(targets, deps = {}) {
+     const views = targets.filter(
+       (target) => target.type === 'webview' && target.parentId === page.id,
+     )
++    const selection = await selectPane(views, shell, deps)
+     windows.push({
+       pageTargetId: page.id,
+       pageTitle: page.title ?? '',
+@@ -153,7 +243,9 @@ export async function readWindows(targets, deps = {}) {
+       restoring: shell.restoring,
+       readError,
+       views,
+-      pane: shell.restoring ? null : matchVisiblePane(views, shell.visiblePaneUrl),
++      pane: selection.pane,
++      paneError: selection.paneError,
++      paneErrorMessage: selection.paneErrorMessage,
+     })
+   }
+   return windows
+diff --git a/tests/pane.test.js b/tests/pane.test.js
+index 4aa9055..454bd3b 100644
+--- a/tests/pane.test.js
++++ b/tests/pane.test.js
+@@ -54,6 +54,8 @@ function windowRecord({
+   visiblePaneUrl,
+   paneId = null,
+   restoring = false,
++  paneError = null,
++  paneErrorMessage = null,
+ } = {}) {
+   let allViews = views
+   if (allViews === undefined) {
+@@ -71,7 +73,9 @@ function windowRecord({
+     restoring,
+     readError: null,
+     views: allViews,
+-    pane: matchVisiblePane(allViews, visiblePaneUrl),
++    pane: restoring || paneError !== null ? null : matchVisiblePane(allViews, visiblePaneUrl),
++    paneError,
++    paneErrorMessage,
+   }
+ }
+ 
+@@ -146,7 +150,9 @@ function harness({
+     async readWindows() {
+       return state.windows.map((win) => ({
+         ...win,
+-        pane: win.restoring === true ? null : matchVisiblePane(win.views, win.visiblePaneUrl),
++        pane: win.restoring === true || win.paneError
++          ? null
++          : matchVisiblePane(win.views, win.visiblePaneUrl),
+       }))
+     },
+     async connect(target) {
+@@ -490,3 +496,72 @@ test('browser_scope_probe reports the restore screen and no chosen pane', async
+   assert.equal(probe.chosenPane, null)
+   assert.match(probe.reason, /no pane is visible in the caller's session view yet/)
+ })
++
++const SAME = 'https://same.example/'
++
++/** A caller window whose same-URL panes could not be told apart by frames. */
++function ambiguousWindow({ paneError = 'no-frames' } = {}) {
++  return windowRecord({
++    views: [view('pane-a', { url: SAME }), view('pane-b', { url: SAME })],
++    visiblePaneUrl: SAME,
++    paneError,
++    paneErrorMessage: `several panes in this window show ${SAME} and the visible one could not be `
++      + 'identified; bring this session\'s DSH window to the front and retry',
++  })
++}
++
++test('an ambiguous same-url window fails pane tools with the disambiguation message', async () => {
++  const h = harness({ windows: [ambiguousWindow()] })
++  const expected = /several panes in this window show https:\/\/same\.example\/ and the visible one could not be identified; bring this session's DSH window to the front and retry/
++
++  await assert.rejects(h.tool('browser_snapshot').execute({}, EXEC), expected)
++  await assert.rejects(h.tool('browser_attach').execute({}, EXEC), (error) => {
++    assert.doesNotMatch(error.message, /call browser_open/)
++    return true
++  })
++  await assert.rejects(h.tool('browser_open').execute({ url: SAME }, EXEC), expected)
++  await assert.rejects(h.tool('browser_navigate').execute({ url: SAME }, EXEC), expected)
++  await assert.rejects(h.tool('browser_screenshot').execute({}, EXEC), expected)
++
++  assert.equal(h.state.openCalls.length, 0)
++  assert.equal(h.state.connectedTargets.length, 0)
++  assert.equal(h.state.evaluates.length, 0)
++})
++
++test('browser_targets and browser_scope_probe report the pane error', async () => {
++  const h = harness({ windows: [ambiguousWindow({ paneError: 'ambiguous' })] })
++
++  const targets = JSON.parse(await h.tool('browser_targets').execute({}, EXEC))
++  assert.equal(targets.windows[0].paneError, 'ambiguous')
++  assert.equal(targets.windows[0].paneTargetId, null)
++  assert.match(targets.windows[0].paneErrorMessage, /bring this session's DSH window to the front and retry/)
++
++  const probe = JSON.parse(await h.tool('browser_scope_probe').execute({}, EXEC))
++  assert.equal(probe.chosenPane, null)
++  assert.equal(probe.windows[0].paneError, 'ambiguous')
++  assert.match(probe.reason, /bring this session's DSH window to the front and retry/)
++})
++
++test("another window's same-url ambiguity does not block the caller's window", async () => {
++  const h = harness({
++    windows: [
++      windowRecord({ id: 'window-1', sessionId: 'session-a', paneId: 'pane-1' }),
++      windowRecord({
++        id: 'window-2',
++        sessionId: 'session-b',
++        title: 'Other — DeepSeek Harness',
++        views: [
++          view('pane-x', { parentId: 'window-2', url: SAME }),
++          view('pane-y', { parentId: 'window-2', url: SAME }),
++        ],
++        visiblePaneUrl: SAME,
++        paneError: 'no-frames',
++        paneErrorMessage: 'several panes in this window show the same URL',
++      }),
++    ],
++  })
++
++  await h.tool('browser_snapshot').execute({}, EXEC)
++
++  assert.equal(h.state.connectedTargets[0].id, 'pane-1')
++})
+diff --git a/tests/scope.test.js b/tests/scope.test.js
+index b13991e..68d4628 100644
+--- a/tests/scope.test.js
++++ b/tests/scope.test.js
+@@ -5,6 +5,7 @@ import {
+   chooseCallerPane,
+   describeTargets,
+   matchVisiblePane,
++  matchVisiblePaneCandidates,
+   sessionTitle,
+   windowSessionTitle,
+ } from '../lib/scope.js'
+@@ -70,6 +71,36 @@ test('matchVisiblePane treats null, empty and invalid URLs as no match', () => {
+ })
+ 
+ 
++test('matchVisiblePaneCandidates returns every URL match in view order', () => {
++  const views = [
++    { id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://x.test/same/' },
++    { id: 'pane-b', type: 'webview', parentId: 'window', url: 'https://x.test/other' },
++    { id: 'pane-c', type: 'webview', parentId: 'window', url: 'https://x.test/same' },
++  ]
++  assert.deepEqual(
++    matchVisiblePaneCandidates(views, 'https://x.test/same').map((view) => view.id),
++    ['pane-a', 'pane-c'],
++  )
++  assert.deepEqual(
++    matchVisiblePaneCandidates(views, 'https://x.test/other').map((view) => view.id),
++    ['pane-b'],
++  )
++  assert.deepEqual(matchVisiblePaneCandidates(views, 'https://x.test/missing'), [])
++  assert.deepEqual(matchVisiblePaneCandidates(views, null), [])
++  assert.deepEqual(matchVisiblePaneCandidates(views, 'not a url'), [])
++  assert.deepEqual(matchVisiblePaneCandidates(null, 'https://x.test/same'), [])
++})
++
++test('chooseCallerPane surfaces an unidentified-visible-pane reason instead of no-pane', () => {
++  const win = windowRecord({ id: 'w1', sessionId: 's1' })
++  win.paneError = 'no-frames'
++  win.paneErrorMessage = 'several panes in this window show https://x.test/same but none is producing frames'
++  const choice = chooseCallerPane([win], { callerSessionId: 's1' })
++  assert.equal(choice.chosen, null)
++  assert.equal(choice.callerWindow.pageTargetId, 'w1')
++  assert.equal(choice.reason, win.paneErrorMessage)
++})
++
+ test('chooseCallerPane chooses the pane of the window showing the caller', () => {
+   const windows = [
+     windowRecord({ id: 'w2', sessionId: 's2', paneId: 'pane-2' }),
+diff --git a/tests/windows.test.js b/tests/windows.test.js
+index 908e877..b9e17bc 100644
+--- a/tests/windows.test.js
++++ b/tests/windows.test.js
+@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
+ import vm from 'node:vm'
+ 
+ import {
++  FRAME_PROBE_SCRIPT,
++  FRAME_PROBE_TIMEOUT_MS,
+   parseCurrentSession,
+   parseVisiblePaneUrl,
+   parseWindowShell,
++  probeFrameProduction,
+   readWindows,
+   WINDOW_SHELL_SCRIPT,
+ } from '../lib/windows.js'
+@@ -136,10 +139,13 @@ const VISIBLE = { id: 'pane-visible', type: 'webview', parentId: 'window-1', url
+ /** Injectable shell reads: one evaluate per window, keyed by page target id. */
+ function shellDeps(shells) {
+   const evaluated = []
++  const connections = []
+   return {
+     evaluated,
++    connections,
+     deps: {
+       async connect(page) {
++        connections.push(page.id)
+         return { targetId: page.id, close() {} }
+       },
+       async evaluate(session) {
+@@ -273,3 +279,176 @@ test('readWindows reports a shell read error and chooses no pane', async () => {
+   assert.equal(windows[0].restoring, false)
+   assert.equal(windows[0].pane, null)
+ })
++
++const SAME_URL = 'https://same.example/'
++const SAME_A = { id: 'pane-a', type: 'webview', parentId: 'window-1', url: SAME_URL }
++const SAME_B = { id: 'pane-b', type: 'webview', parentId: 'window-1', url: SAME_URL }
++
++const SAME_SHELL = { current: '{"sessionId":"session-1"}', address: SAME_URL }
++
++/**
++ * Injectable reads for the ambiguous-window tests: one shell evaluate per page
++ * and one frame-probe evaluate per probed webview. `probes` maps a webview id
++ * to the value its probe resolves (a string, or an Error to throw).
++ */
++function probeDeps({ shell = SAME_SHELL, probes = {} } = {}) {
++  const connections = []
++  const closed = []
++  const expressions = []
++  return {
++    connections,
++    closed,
++    expressions,
++    deps: {
++      async connect(target) {
++        connections.push(target.id)
++        const failure = probes[target.id]
++        if (failure instanceof Error) throw failure
++        return {
++          targetId: target.id,
++          close() {
++            closed.push(target.id)
++          },
++        }
++      },
++      async evaluate(session, expression) {
++        expressions.push({ targetId: session.targetId, expression })
++        if (session.targetId === 'window-1') return JSON.stringify(shell)
++        return probes[session.targetId] ?? 'raf-timeout'
++      },
++    },
++  }
++}
++
++test('readWindows probes same-URL candidates and picks the sole frame producer', async () => {
++  const { deps, connections, closed, expressions } = probeDeps({
++    probes: { 'pane-a': 'raf-timeout', 'pane-b': 'raf-fired' },
++  })
++
++  const windows = await readWindows([PAGE, SAME_A, SAME_B], deps)
++
++  assert.equal(windows[0].pane.id, 'pane-b')
++  assert.equal(windows[0].paneError, null)
++  assert.equal(windows[0].paneErrorMessage, null)
++  assert.deepEqual(connections, ['window-1', 'pane-a', 'pane-b'])
++  assert.deepEqual([...closed].sort(), ['pane-a', 'pane-b', 'window-1'])
++  assert.equal(expressions.filter((entry) => entry.expression === FRAME_PROBE_SCRIPT).length, 2)
++})
++
++test('readWindows reports no-frames when no same-URL candidate produces frames', async () => {
++  const { deps } = probeDeps({
++    probes: { 'pane-a': 'raf-timeout', 'pane-b': 'raf-timeout' },
++  })
++
++  const windows = await readWindows([PAGE, SAME_A, SAME_B], deps)
++
++  assert.equal(windows[0].pane, null)
++  assert.equal(windows[0].paneError, 'no-frames')
++  assert.match(windows[0].paneErrorMessage, /several panes in this window show https:\/\/same\.example\//)
++  assert.match(windows[0].paneErrorMessage, /bring this session's DSH window to the front and retry/)
++})
++
++test('readWindows reports ambiguity when several same-URL candidates produce frames', async () => {
++  const { deps } = probeDeps({
++    probes: { 'pane-a': 'raf-fired', 'pane-b': 'raf-fired' },
++  })
++
++  const windows = await readWindows([PAGE, SAME_A, SAME_B], deps)
++
++  assert.equal(windows[0].pane, null)
++  assert.equal(windows[0].paneError, 'ambiguous')
++  assert.match(windows[0].paneErrorMessage, /more than one is producing animation frames/)
++  assert.match(windows[0].paneErrorMessage, /bring this session's DSH window to the front and retry/)
++})
++
++test('readWindows treats a failed probe as no frames, never a guess', async () => {
++  const { deps, closed } = probeDeps({
++    probes: { 'pane-a': new Error('socket closed'), 'pane-b': new Error('socket closed') },
++  })
++
++  const windows = await readWindows([PAGE, SAME_A, SAME_B], deps)
++
++  assert.equal(windows[0].pane, null)
++  assert.equal(windows[0].paneError, 'no-frames')
++  assert.deepEqual(closed, ['window-1'])
++})
++
++test('readWindows takes a single URL match without probing', async () => {
++  const { deps, connections, evaluated } = shellDeps({
++    'window-1': { current: '{"sessionId":"session-1"}', address: 'https://visible.example/docs/' },
++  })
++
++  const windows = await readWindows([PAGE, HIDDEN, VISIBLE], deps)
++
++  assert.equal(windows[0].pane.id, 'pane-visible')
++  assert.equal(windows[0].paneError, null)
++  assert.deepEqual(evaluated, ['window-1'])
++  assert.deepEqual(connections, ['window-1'])
++})
++
++test('readWindows does not probe a restoring window with same-URL webviews', async () => {
++  const { deps, connections } = probeDeps({
++    shell: { current: '{"sessionId":"session-1"}', address: SAME_URL, restoring: true },
++    probes: { 'pane-a': 'raf-fired', 'pane-b': 'raf-fired' },
++  })
++
++  const windows = await readWindows([PAGE, SAME_A, SAME_B], deps)
++
++  assert.equal(windows[0].restoring, true)
++  assert.equal(windows[0].pane, null)
++  assert.equal(windows[0].paneError, null)
++  assert.deepEqual(connections, ['window-1'])
++})
++
++test('the frame probe resolves raf-fired on a frame and raf-timeout on the timer', async () => {
++  assert.equal(FRAME_PROBE_TIMEOUT_MS, 600)
++  assert.match(FRAME_PROBE_SCRIPT, /600/)
++
++  let frameCallback = null
++  const firing = vm.runInNewContext(FRAME_PROBE_SCRIPT, {
++    requestAnimationFrame: (callback) => { frameCallback = callback },
++    setTimeout: () => 1,
++    clearTimeout: () => {},
++  })
++  frameCallback()
++  assert.equal(await firing, 'raf-fired')
++
++  let timerCallback = null
++  let lateFrame = null
++  const timingOut = vm.runInNewContext(FRAME_PROBE_SCRIPT, {
++    requestAnimationFrame: (callback) => { lateFrame = callback },
++    setTimeout: (callback) => { timerCallback = callback; return 1 },
++    clearTimeout: () => {},
++  })
++  timerCallback()
++  assert.equal(await timingOut, 'raf-timeout')
++  assert.equal(typeof lateFrame, 'function')
++})
++
++test('probeFrameProduction closes the probe session and survives a failed probe', async () => {
++  const closed = []
++  const ok = await probeFrameProduction(SAME_A, {
++    async connect() {
++      return {
++        close() {
++          closed.push('opened')
++        },
++      }
++    },
++    async evaluate() {
++      return 'raf-fired'
++    },
++  })
++  assert.equal(ok, true)
++  assert.deepEqual(closed, ['opened'])
++
++  const failed = await probeFrameProduction(SAME_A, {
++    async connect() {
++      throw new Error('no socket')
++    },
++    async evaluate() {
++      throw new Error('unreachable')
++    },
++  })
++  assert.equal(failed, false)
++})

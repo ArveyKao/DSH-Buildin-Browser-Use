@@ -11,7 +11,7 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 - Address, device or artifact location: repo `/Users/mt/plugins/build-in-browser-use`; armed via DSH bundle patch (`dsh.bundle.patch` → `cordis.patch.yml`); cookie state at `~/.dsh/browser-state/<workspace-hash>.json`.
 - Final demo (command/URL, inputs, expected output): with DSH launched via the CDP launcher and the plugin armed — Session A `browser_open` a URL in its own view; Session B (same workspace) opens/reads its OWN pane; screenshots show what each user sees; after DSH restart, restore-screen views re-spawn their own pane on open and cookies persist per calling workspace. Verified live in `changes/own-visible-pane/evidence/live-verify.md`.
 - Applicable evidence / required review: `node --check` + `node --test` unit tests for scope/state logic; live CDP smoke receipts against the running app; cross-family review of the consolidated candidate.
-- Current next action or waiting dependency: none — own-visible-pane model delivered and live-verified; awaiting any new user request.
+- Current next action or waiting dependency: goal `goal_374d1363` in flight — waiting on rework task `tsk_d997688b` (capture-completion probe), then live identical-URL verification in both switch directions.
 
 ## Existing commands
 
@@ -28,10 +28,12 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- Delivered: goal `goal_f8e1c791` (own-visible-pane model), commits `9c8442c` (visible-bar URL matching, no first-webview fallback, screenshot 15s timeout) + `de5229b` (restore screen → pane null; open clicks Restore page first); 95 tests. Receipts: `changes/own-visible-pane/evidence/` (verify.json, verify-restore.json, live-verify.md, docs-check.md). Live matrix passed: two gms sessions drive their OWN coexisting panes; restore-screen open spawns the view's own pane; yl-web cross-workspace own pane; screenshots + switch-back; cookie files isolated per calling workspace.
-- Delivered: goal `goal_256ed8e4` (window-pane model), commits `06af84f` + `c053510`, receipts `changes/window-pane/evidence/`, pushed through `5e4b1c8`.
-- Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), commits through `c80e2fb`, pushed.
-- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner). Three test panes left open (example.com / example.org / example.net); user's SSO cookies persist in the gms cookie file.
+- Delivered: goal `goal_0171c3c9` (same-URL capture-completion disambiguation; superseded goals `goal_25bacc7c` rAF design and `goal_374d1363` pre-refinement wording). Commits `654a770` (capture probe) + poll-skip commit; 121 tests. Live matrix passed BOTH switch directions + repeat, marker-checked snapshots and screenshots (`changes/frame-probe/evidence/live-verify.md`). rAF design live-invalidated (`live-raf-inversion.md`), archived diff `raf-candidate.diff`. Zero-producer live demo NOT RUN (OS accessibility / Browser-domain blocked); unit-covered. Receipts: verify-capture.json, review-capture.md, verify-poll-skip.json, live-verify.md, docs-check.md.
+- Delivered: goal `goal_f8e1c791` (own-visible-pane model), commits `9c8442c` + `de5229b` + record `74235eb`, pushed; receipts `changes/own-visible-pane/evidence/`.
+- Delivered: goal `goal_256ed8e4` (window-pane model), receipts `changes/window-pane/evidence/`, pushed through `5e4b1c8`.
+- Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), pushed through `c80e2fb`.
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (window `8BBA3A45…`). Live test state: two same-URL example.com panes with markers, B displayed.
+- Known environment limits: dispatch review tasks never leave queued in this orchestrator (independent review via fresh read-only agent context instead); slot worktrees reset to HEAD, so commit applied work before dispatching dependent tasks; osascript System Events writes blocked (no accessibility grant); this Electron build lacks Browser.getWindowForTarget.
 - Next: commit receipts + brief, push origin main. No open tasks.
 
 ## Target applicability and access

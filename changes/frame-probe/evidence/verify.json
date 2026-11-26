@@ -1,0 +1,28 @@
+{
+  "attempt_id": "run_e8c8ef1f01a14755b6d5dd355ea660e9",
+  "at": "2026-11-26T13:39:57.045Z",
+  "done_check": "node --check index.js && for f in lib/*.js; do node --check \"$f\"; done && node --test",
+  "passed": true,
+  "results": [
+    {
+      "command": "node --check index.js && for f in lib/*.js; do node --check \"$f\"; done && node --test",
+      "exit_code": 0,
+      "timed_out": false,
+      "output_tail": "ch in view order (1.171084ms)\n✔ chooseCallerPane surfaces an unidentified-visible-pane reason instead of no-pane (0.319125ms)\n✔ chooseCallerPane chooses the pane of the window showing the caller (0.679916ms)\n✔ chooseCallerPane reports the caller window when it has no pane yet (0.266417ms)\n✔ chooseCallerPane never borrows the pane of another window (0.511667ms)\n✔ chooseCallerPane fails clearly when the caller is displayed in no window (0.30675ms)\n✔ chooseCallerPane is not filtered by workspace: a window showing the caller hosts its pane (0.250375ms)\n✔ chooseCallerPane falls back to the window title only when no session id is readable (0.110292ms)\n✔ chooseCallerPane title fallback reports a titled window with no pane (0.198334ms)\n✔ chooseCallerPane ignores titles while any window yields a session id (0.067584ms)\n✔ chooseCallerPane title fallback misses when no window is titled for the caller (0.04875ms)\n✔ windowSessionTitle strips only the product suffix (0.033792ms)\n✔ sessionTitle reads the latest title event (0.09625ms)\n✔ describeTargets maps each page to the webview pane it hosts (0.328125ms)\n✔ workspaceKey is a stable 16-hex digest of workspace identity (4.522417ms)\n✔ workspaceStatePath lives under the per-workspace state directory (0.30075ms)\n✔ snapshot then restore round-trips cookies for one workspace (20.685333ms)\n✔ restore runs once per process for a workspace (2.227166ms)\n✔ a failed setCookies is retried instead of being marked restored (2.334125ms)\n✔ cookie files are isolated per workspace (2.389125ms)\n✔ a malformed snapshot never overwrites an existing cookie file (2.517292ms)\n✔ an empty cookie list is persisted as a real empty snapshot (2.438291ms)\n✔ a corrupt cookie file loads as empty (1.396625ms)\n✔ cookie files are written with private permissions (1.087417ms)\n✔ parseCurrentSession reads the session bridge value (0.996708ms)\n✔ parseCurrentSession rejects unusable values (0.114791ms)\n✔ window shell returns the visible address-bar value with the session id (6.888583ms)\n✔ window shell reports a visible Restore page screen (0.485ms)\n✔ window shell ignores hidden or inexact Restore page affordances (2.452833ms)\n✔ window shell skips hidden-only address bars (0.273791ms)\n✔ window shell keeps an empty visible bar empty (0.2525ms)\n✔ parseWindowShell maps an empty bar to a null visible URL (0.871042ms)\n✔ parseWindowShell reports the restore screen only for a true flag (0.347416ms)\n✔ parseVisiblePaneUrl trims and rejects empty values (0.22575ms)\n✔ readWindows picks the URL-matched webview, not the first one (0.509375ms)\n✔ readWindows has no first-webview fallback when the visible bar matches no view (0.097084ms)\n✔ readWindows reports a restore screen (bar value, no webview) as no pane (0.077709ms)\n✔ readWindows reports the restore screen and ignores a coincidental URL match (0.062833ms)\n✔ readWindows without a restore screen still matches that same URL (0.060917ms)\n✔ readWindows clears the visible URL when only a hidden bar exists (0.053083ms)\n✔ readWindows maps an empty visible bar to a null URL (0.257458ms)\n✔ readWindows evaluates once per window and keeps views per window (0.36475ms)\n✔ readWindows reports a shell read error and chooses no pane (0.146792ms)\n✔ readWindows probes same-URL candidates and picks the sole frame producer (0.161459ms)\n✔ readWindows reports no-frames when no same-URL candidate produces frames (0.080458ms)\n✔ readWindows reports ambiguity when several same-URL candidates produce frames (0.054667ms)\n✔ readWindows treats a failed probe as no frames, never a guess (0.073166ms)\n✔ readWindows takes a single URL match without probing (0.065708ms)\n✔ readWindows does not probe a restoring window with same-URL webviews (0.044333ms)\n✔ the frame probe resolves raf-fired on a frame and raf-timeout on the timer (1.01525ms)\n✔ probeFrameProduction closes the probe session and survives a failed probe (0.135584ms)\nℹ tests 108\nℹ suites 0\nℹ pass 108\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 183.142875\n"
+    }
+  ],
+  "files": [
+    ".agent/PROJECT.md",
+    "README.md",
+    "docs/DETAIL.md",
+    "index.js",
+    "lib/scope.js",
+    "lib/windows.js",
+    "tests/pane.test.js",
+    "tests/scope.test.js",
+    "tests/windows.test.js"
+  ],
+  "out_of_scope": [
+    ".agent/PROJECT.md"
+  ]
+}
