@@ -18,7 +18,7 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 | Purpose | Command or existing source |
 | --- | --- |
 | Dependency setup and run | None (zero-dependency Node ESM; Node >= 22). Arm by linking the bundle into DSH per `cordis.patch.yml` |
-| Relevant automated checks | `node --test tests/` (to be created by worker); `node --check index.js lib/*.js` |
+| Relevant automated checks | `node --test` (auto-discovery; the `tests/` dir-arg form fails on this Node build); `node --check index.js` + `node --check` per `lib/*.js` |
 | Demo / E2E including meaningful failure/recovery | Live CDP smoke: `curl http://127.0.0.1:9222/json/version` then tool calls from two sessions in one workspace; missing-endpoint failure path must report, not act on wrong page |
 | Build / package | Not applicable (plain JS bundle, no build step) |
 | Deploy / smoke / recovery | Arm/disarm via DSH bundle patch; recovery = remove the patch entry |
@@ -28,10 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- In flight: user-reported orphaned-pane dead end (goal `goal_256ed8e4`). Pane bound to deploy-gms; window switched to a deploy-yl-web session → gms sessions get "no open window shows a session of this workspace", yl-web gets "refusing to cross workspaces". Fix: pane follows the WINDOW displaying the calling session (any workspace); binding guard removed; cookie files stay per workspace. Worker task dispatched.
+- Delivered: goal `goal_256ed8e4` (window-pane model). Pane follows the WINDOW displaying the calling session, any workspace; binding guard removed; cookie files stay per calling workspace. Commits `06af84f` (selection) + `c053510` (visible address-bar pick, fixes open when several pane UIs are mounted). Live replay of the user's dead end passed: yl-web session drives the gms-opened pane, switch back to gms works, user's first session reads the same pane; cookie handover isolated per workspace. Receipts: `changes/window-pane/evidence/{verify,verify-address-bar}.json`, `live-reverify.md`, `docs-check.md`.
 - Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), commits through `c80e2fb`, pushed. Live smoke receipt `changes/pane-spawn-fix/evidence/live-smoke.md`.
-- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner).
-- Next: verify/accept/apply fix → restart DSH → re-verify user scenario (yl-web session drives gms-opened pane; switch back to gms session still works) → record receipts, goal done, push.
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner), pane left at example.com; user's SSO cookies persist in the gms file.
+- Next: push; no open work.
 
 ## Target applicability and access
 
