@@ -53,6 +53,7 @@ function windowRecord({
   views,
   visiblePaneUrl,
   paneId = null,
+  restoring = false,
 } = {}) {
   let allViews = views
   if (allViews === undefined) {
@@ -67,6 +68,7 @@ function windowRecord({
     page: { id, type: 'page', title },
     currentSessionId: sessionId,
     visiblePaneUrl,
+    restoring,
     readError: null,
     views: allViews,
     pane: matchVisiblePane(allViews, visiblePaneUrl),
@@ -144,7 +146,7 @@ function harness({
     async readWindows() {
       return state.windows.map((win) => ({
         ...win,
-        pane: matchVisiblePane(win.views, win.visiblePaneUrl),
+        pane: win.restoring === true ? null : matchVisiblePane(win.views, win.visiblePaneUrl),
       }))
     },
     async connect(target) {
@@ -162,11 +164,16 @@ function harness({
       if (win !== undefined) {
         if (openPane !== undefined) {
           openPane({ state, win, url })
+        } else if (win.restoring === true) {
+          // The trusted Restore page click spawns this view's own webview.
+          spawnPane(state, win, url ?? win.visiblePaneUrl)
+          win.restoring = false
+          if (url !== undefined) win.visiblePaneUrl = url
         } else {
           const visible = matchVisiblePane(win.views, win.visiblePaneUrl)
-          if (visible !== null) visible.url = url
-          else spawnPane(state, win, url)
-          win.visiblePaneUrl = url
+          if (visible !== null && url !== undefined) visible.url = url
+          else if (url !== undefined) spawnPane(state, win, url)
+          if (url !== undefined) win.visiblePaneUrl = url
         }
       }
       return { windowTargetId: page.id, url: url ?? null }
@@ -315,6 +322,39 @@ test('browser_open never accepts an unchanged hidden webview that already shows 
   assert.equal(h.state.connectedTargets.length, 0)
 })
 
+test('a restored view fails a pane tool fast even when a hidden webview shows the stale url', async () => {
+  // Live dead end: the restore screen's stale bar equals another view's webview.
+  const stale = 'https://example.org/'
+  const hidden = view('pane-1', { url: stale })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: stale, restoring: true })],
+  })
+
+  await assert.rejects(
+    h.tool('browser_snapshot').execute({}, EXEC),
+    /no browser pane is visible in this session's view; call browser_open with an HTTP\(S\) url first/,
+  )
+  assert.equal(h.state.openCalls.length, 0)
+  assert.equal(h.state.connectedTargets.length, 0)
+})
+
+test('browser_open in a restored view returns the spawned pane, never the coincidental hidden match', async () => {
+  const stale = 'https://example.org/'
+  const hidden = view('pane-1', { url: stale })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: stale, restoring: true })],
+  })
+
+  const output = await h.tool('browser_open').execute({ url: stale }, EXEC)
+
+  assert.equal(h.state.openCalls.length, 1)
+  assert.equal(h.state.connectedTargets[0].id, 'pane-2')
+  assert.match(output, /Pane pane-2/)
+  assert.equal(h.state.windows[0].restoring, false)
+  const untouched = h.state.windows[0].views.find((candidate) => candidate.id === 'pane-1')
+  assert.equal(untouched.url, stale)
+})
+
 test('a session of another workspace drives the pane its window already shows', async () => {
   // Workspace A opened pane-1; the user switched the window to workspace B's session.
   const h = harness({
@@ -425,11 +465,28 @@ test('browser_targets and browser_scope_probe report the visible pane URL and we
   const targets = JSON.parse(await h.tool('browser_targets').execute({}, EXEC))
   assert.equal(targets.windows[0].visiblePaneUrl, 'https://mine.example/')
   assert.equal(targets.windows[0].webviewCount, 2)
+  assert.equal(targets.windows[0].restoring, false)
   assert.equal(targets.windows[0].showsCaller, true)
   assert.equal(targets.windows[0].paneTargetId, 'pane-mine')
 
   const probe = JSON.parse(await h.tool('browser_scope_probe').execute({}, EXEC))
   assert.equal(probe.windows[0].visiblePaneUrl, 'https://mine.example/')
   assert.equal(probe.windows[0].webviewCount, 2)
+  assert.equal(probe.windows[0].restoring, false)
   assert.equal(probe.chosenPane.id, 'pane-mine')
+})
+
+test('browser_scope_probe reports the restore screen and no chosen pane', async () => {
+  const stale = 'https://example.org/'
+  const hidden = view('pane-1', { url: stale })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: stale, restoring: true })],
+  })
+
+  const probe = JSON.parse(await h.tool('browser_scope_probe').execute({}, EXEC))
+
+  assert.equal(probe.windows[0].restoring, true)
+  assert.equal(probe.windows[0].paneTargetId, null)
+  assert.equal(probe.chosenPane, null)
+  assert.match(probe.reason, /no pane is visible in the caller's session view yet/)
 })

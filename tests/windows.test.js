@@ -21,9 +21,19 @@ function stubInput(width, value) {
   }
 }
 
+/** Stub restore-screen affordance carrying only what the shell script reads. */
+function stubRestore({ width = 120, height = 28, text = 'Restore page' } = {}) {
+  return {
+    textContent: text,
+    getBoundingClientRect: () => ({ width, height }),
+  }
+}
+
 /** Evaluate the exported shell script against stub inputs and localStorage. */
-function runShell({ current = null, inputs = [] } = {}) {
-  const document = { querySelectorAll: (selector) => (selector === 'input' ? inputs : []) }
+function runShell({ current = null, inputs = [], restore = [] } = {}) {
+  const document = {
+    querySelectorAll: (selector) => (selector === 'input' ? inputs : restore),
+  }
   const localStorage = { getItem: (key) => (key === 'dsh.sessions.current' ? current : null) }
   return JSON.parse(vm.runInNewContext(WINDOW_SHELL_SCRIPT, { document, localStorage }))
 }
@@ -54,7 +64,26 @@ test('window shell returns the visible address-bar value with the session id', (
   assert.deepEqual(parsed, {
     current: '{"sessionId":"session-1"}',
     address: 'https://visible.example/',
+    restoring: false,
   })
+})
+
+test('window shell reports a visible Restore page screen', () => {
+  const parsed = runShell({
+    current: '{"sessionId":"session-1"}',
+    inputs: [stubInput(435.5, 'https://example.org/')],
+    restore: [stubRestore()],
+  })
+  assert.equal(parsed.restoring, true)
+  assert.equal(parsed.address, 'https://example.org/')
+})
+
+test('window shell ignores hidden or inexact Restore page affordances', () => {
+  assert.equal(runShell({ restore: [stubRestore({ width: 0 })] }).restoring, false)
+  assert.equal(runShell({ restore: [stubRestore({ height: 0 })] }).restoring, false)
+  assert.equal(runShell({ restore: [stubRestore({ text: 'Restore page now' })] }).restoring, false)
+  assert.equal(runShell({ restore: [stubRestore({ text: 'Restore' })] }).restoring, false)
+  assert.equal(runShell({ restore: [stubRestore({ text: '  Restore page  ' })] }).restoring, true)
 })
 
 test('window shell skips hidden-only address bars', () => {
@@ -71,12 +100,25 @@ test('parseWindowShell maps an empty bar to a null visible URL', () => {
   assert.deepEqual(parseWindowShell({ current: '{"sessionId":"s1"}', address: '' }), {
     currentSessionId: 's1',
     visiblePaneUrl: null,
+    restoring: false,
   })
   assert.deepEqual(parseWindowShell('{"current":"{\\"sessionId\\":\\"s1\\"}","address":"https://x.test/"}'), {
     currentSessionId: 's1',
     visiblePaneUrl: 'https://x.test/',
+    restoring: false,
   })
-  assert.deepEqual(parseWindowShell('not json'), { currentSessionId: null, visiblePaneUrl: null })
+  assert.deepEqual(parseWindowShell('not json'), {
+    currentSessionId: null,
+    visiblePaneUrl: null,
+    restoring: false,
+  })
+})
+
+test('parseWindowShell reports the restore screen only for a true flag', () => {
+  assert.equal(parseWindowShell({ current: null, address: 'https://x.test/', restoring: true }).restoring, true)
+  assert.equal(parseWindowShell({ restoring: 'true' }).restoring, false)
+  assert.equal(parseWindowShell({ restoring: 1 }).restoring, false)
+  assert.equal(parseWindowShell(null).restoring, false)
 })
 
 test('parseVisiblePaneUrl trims and rejects empty values', () => {
@@ -143,6 +185,36 @@ test('readWindows reports a restore screen (bar value, no webview) as no pane', 
   assert.equal(windows[0].visiblePaneUrl, 'https://portal.example/user-portal')
   assert.equal(windows[0].views.length, 0)
   assert.equal(windows[0].pane, null)
+  assert.equal(windows[0].restoring, false)
+})
+
+test('readWindows reports the restore screen and ignores a coincidental URL match', async () => {
+  // Live dead end: the stale bar equals another view's live webview URL.
+  const stale = 'https://example.org/'
+  const coincidental = { id: 'pane-hidden', type: 'webview', parentId: 'window-1', url: stale }
+  const { deps } = shellDeps({
+    'window-1': { current: '{"sessionId":"session-1"}', address: stale, restoring: true },
+  })
+
+  const windows = await readWindows([PAGE, coincidental], deps)
+
+  assert.equal(windows[0].restoring, true)
+  assert.equal(windows[0].visiblePaneUrl, stale)
+  assert.equal(windows[0].views.length, 1)
+  assert.equal(windows[0].pane, null)
+})
+
+test('readWindows without a restore screen still matches that same URL', async () => {
+  const stale = 'https://example.org/'
+  const coincidental = { id: 'pane-hidden', type: 'webview', parentId: 'window-1', url: stale }
+  const { deps } = shellDeps({
+    'window-1': { current: '{"sessionId":"session-1"}', address: stale },
+  })
+
+  const windows = await readWindows([PAGE, coincidental], deps)
+
+  assert.equal(windows[0].restoring, false)
+  assert.equal(windows[0].pane.id, 'pane-hidden')
 })
 
 test('readWindows clears the visible URL when only a hidden bar exists', async () => {
@@ -198,5 +270,6 @@ test('readWindows reports a shell read error and chooses no pane', async () => {
 
   assert.match(windows[0].readError, /no webSocketDebuggerUrl/)
   assert.equal(windows[0].visiblePaneUrl, null)
+  assert.equal(windows[0].restoring, false)
   assert.equal(windows[0].pane, null)
 })

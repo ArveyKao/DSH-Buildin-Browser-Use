@@ -5,6 +5,8 @@ drives the pane that is VISIBLE in the calling Session's own view: it reads the
 window's visible address-bar URL, matches it against that window's webview
 targets, and loads `browser_open` / `browser_navigate` URLs through that same
 visible bar. Other sessions' webviews stay alive but hidden and are never driven.
+A view restored from a previous process shows a "Restore page" screen whose bar
+is stale and which owns no webview; the opener restores it before loading.
 The plugin is a native Host cordis bundle (`export function apply(ctx)`), so it
 can see the calling Session; it drives DSH's built-in browser over CDP. Cookie
 snapshots remain per workspace (see below).
@@ -15,7 +17,7 @@ snapshots remain per workspace (see below).
 |---|---|
 | `browser_targets` | List windows, the Session each shows, each window's visible pane URL and webview count, and every CDP target |
 | `browser_scope_probe` | Same mapping plus the pane visible in the caller's view and why it was chosen |
-| `browser_open` | Open the pane visible in this session's view, optionally loading a URL (the URL is required when no visible pane exists yet) |
+| `browser_open` | Open the pane visible in this session's view, optionally loading a URL (the URL is required when no visible pane exists yet); a restore screen is restored first |
 | `browser_attach` | Report the pane visible in this session's view |
 | `browser_navigate` | Load a URL in the visible pane |
 | `browser_open_external` | Hand a URL to the user's own default browser |
@@ -42,7 +44,9 @@ One shell evaluate per window reads that value **and** the visible address bar:
 the first `input` whose placeholder matches `Enter an HTTP(S) address` and whose
 `getBoundingClientRect().width > 0`. Hidden views mount their pane UI in the same
 shell but report a 0-width bar, so they are skipped. An empty bar value is
-`null`.
+`null`. The same evaluate also reports `restoring: true` when a visible
+`button`/`a`/`[role="button"]` element whose trimmed `textContent` is exactly
+`Restore page` is mounted.
 
 The window whose stored Session id equals the caller's Session id is
 authoritative. Within it:
@@ -53,8 +57,17 @@ authoritative. Within it:
   with `URL` (host case folded, a trailing `/` dropped from a non-root path) and
   the first matching webview wins. Null/empty/invalid URLs match nothing.
 - There is **no first-webview fallback**. A bar value with no matching webview
-  (for example a "Previously opened / Restore page" screen) means no visible pane
-  yet, even when the window hosts other views' hidden webviews.
+  means no visible pane yet, even when the window hosts other views' hidden
+  webviews.
+- When `restoring` is true, `pane` is `null` **regardless of any URL match**.
+  The bar belongs to a restore screen ("Previously opened / <title> / Restore
+  page") for a pane loaded in a previous process: it is pre-filled with the OLD
+  URL and the view has no webview of its own yet. That stale value must never
+  pick another view's webview just because the URLs coincide. `visiblePaneUrl`
+  and `views` are still reported.
+- **Identical URLs are indistinguishable.** If two views show the exact same
+  URL, the first matching webview is used; URL matching cannot tell them apart.
+  Restore screens are exempt because they never match.
 
 Matching by window title (`<session title> — DeepSeek Harness`) is kept only as a
 fallback for builds where no window yields a stored session id.
@@ -67,12 +80,24 @@ page, and the previous view's webview is left untouched.
 
 `browser_open` / `browser_navigate` type the URL into the caller view's VISIBLE
 address bar (`lib/ops.js` picks the visible input among hidden pane UIs) and press
-Enter. Before opening, the plugin records the window's webview ids and URLs; then
+Enter.
+
+When the caller's view is showing a **restore screen**, the opener first
+trusted-clicks its visible "Restore page" button (before focusing or typing into
+the bar) and polls — within the same timeout budget — until the affordance is
+gone and the visible bar is present. Only then does it focus the bar, type the
+URL and press Enter. This is what makes the view spawn its OWN webview instead
+of navigating another view's webview: typing into the restore screen's stale bar
+otherwise lands in whichever webview that stale URL still matches. The restore
+click is also performed when the opener is called without a URL, so the view's
+own pane spawns in that case too.
+
+Before opening, the plugin records the window's webview ids and URLs; then
 it polls (25 × 300ms) the target list and a fresh window read:
 
 - A webview with an id that did not exist before is the visible view's spawned
-  pane. When several appeared, the one matching the refreshed visible-bar URL
-  wins.
+  pane (a restore-spawned webview is new too). When several appeared, the one
+  matching the refreshed visible-bar URL wins.
 - If no new target appears, only a pre-existing view whose URL **changed** to the
   refreshed visible-bar URL is returned (the bar navigated that pane).
 - An unchanged pre-existing webview that already showed the URL — typically
@@ -99,6 +124,11 @@ normally. This avoids loading the URL twice.
   fallback only when no window yields a stored id.
 - If the caller's view has no visible pane yet, one is opened there through its
   visible bar.
+- A view showing a restore screen reports `restoring: true` and no pane; its
+  stale bar is never matched, even against an identical URL. Opening clicks
+  "Restore page" first so the view's own pane spawns.
+- Two views showing the identical URL are indistinguishable by URL; the first
+  matching webview is used. Restore screens never match.
 - A Session that is not displayed in any open window cannot be routed to a pane.
   The call fails with "this session is not displayed in any open window; switch
   to it in a DSH window first".
@@ -137,6 +167,8 @@ tool output shows `persisted: -1` and a failed restore shows
 - A call that needs a pane but has no URL fails immediately when the caller's view
   has no visible pane, instead of opening an empty pane and waiting for a target
   that never appears.
+- A restore screen that never resolves fails with "the restored browser pane did
+  not finish restoring" instead of typing into the stale bar.
 - A screenshot on a hidden pane fails after 15s with the switch-session message
   instead of hanging.
 - Read errors for individual windows are reported in `browser_targets` /

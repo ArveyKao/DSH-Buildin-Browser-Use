@@ -7,8 +7,9 @@ DSH keeps one browser pane **per session view**. The plugin drives the pane that
 is VISIBLE in the calling Session's own view: it matches the window's visible
 address-bar URL against that window's webview targets, and `browser_open` /
 `browser_navigate` load the URL through that visible bar. Other sessions'
-webviews (alive but hidden) are never driven. Cookie snapshot files stay per
-workspace.
+webviews (alive but hidden) are never driven. A view restored from a previous
+process shows a "Restore page" screen with a stale bar and no pane of its own;
+the plugin restores it before loading. Cookie snapshot files stay per workspace.
 
 ## Why CDP
 
@@ -29,23 +30,36 @@ therefore map it to the pane visible in its own view.
 - **Selection is by the visible address bar.** Each window's shell page stores
   the displayed Session id in `localStorage['dsh.sessions.current']`; the plugin
   reads that (one evaluate per window) together with the visible address bar's
-  value. The caller's window decides which view belongs to the caller, and the
-  bar URL is normalized and matched against every webview in that window. There
-  is no first-webview fallback: an unmatched bar means no visible pane yet.
-  Window-title matching is only a fallback when no window yields a session id.
+  value and whether a "Restore page" affordance is mounted. The caller's window
+  decides which view belongs to the caller, and the bar URL is normalized and
+  matched against every webview in that window. There is no first-webview
+  fallback: an unmatched bar means no visible pane yet. Window-title matching is
+  only a fallback when no window yields a session id.
+- **Restore screens report no pane.** A view whose pane was loaded in a previous
+  DSH process reopens on a "Previously opened / <title> / Restore page" screen:
+  its address bar is mounted and pre-filled with the OLD URL, but the view has
+  no webview target yet. That stale bar identifies no live pane of this view, so
+  it is never matched to another view's webview — not even when both URLs are
+  identical. `browser_open` / `browser_navigate` trusted-click "Restore page"
+  first, wait for this view's own pane, then load the requested URL through the
+  now-live bar.
 - **Switching sessions switches the visible pane.** There is no handover of one
   shared page: the newly displayed view's own bar and webview become the target,
   and the previous view's webview is left alone.
 - **Pane spawn rule.** DSH creates a pane's `webview` target only after an
-  HTTP(S) URL loads in its address bar. So a view with no pane must first call
+  HTTP(S) URL loads in its address bar (a restored view spawns its pane when
+  "Restore page" is clicked). So a view with no pane must first call
   `browser_open` or `browser_navigate` *with* a URL, which types into the visible
   bar and spawns the webview; every other tool needs an already-open visible pane
   and fails fast otherwise. After opening, the plugin returns the webview with a
-  fresh target id (the visible view's spawned pane), or, when no new target
-  appears, an existing view whose URL the bar changed. A hidden view that already
-  showed that URL is never taken.
+  fresh target id (the visible view's spawned pane, including a restore-spawned
+  one), or, when no new target appears, an existing view whose URL the bar
+  changed. A hidden view that already showed that URL is never taken.
 - **Explicit `targetId` must be the caller's own pane.** An unknown id, a non-pane
   target, or another webview (even in the same window) is refused.
+- **Identical URLs are indistinguishable.** Two views showing the exact same URL
+  cannot be told apart by URL, so the first matching webview is used. Restore
+  screens are the exception: their stale bar never identifies a live pane.
 - **Not displayed, no pane.** A Session shown in no open window gets a clear
   error: switch to it in a DSH window first.
 - **Screenshots are bounded.** `Page.captureScreenshot` never completes on a
@@ -71,7 +85,7 @@ The HTTP cache stays in memory and does not survive restarts — cookies only.
 |---|---|
 | `browser_targets` | List windows, the Session each shows, each window's visible pane URL and webview count, and every CDP target |
 | `browser_scope_probe` | Same mapping plus the pane visible in the caller's view and why it was chosen |
-| `browser_open` | Open the pane visible in this session's view, optionally loading a URL (the URL is required when no visible pane exists yet) |
+| `browser_open` | Open the pane visible in this session's view, optionally loading a URL (the URL is required when no visible pane exists yet); a restore screen is restored first |
 | `browser_attach` | Report the pane visible in this session's view, without navigating |
 | `browser_navigate` | Load a URL in the visible pane; hands an unreachable host to your default browser |
 | `browser_open_external` | Open a URL in your own default browser; nothing is automated there |
@@ -119,6 +133,8 @@ order and failure behavior: [docs/DETAIL.md](docs/DETAIL.md).
   processes — a developer-machine setting, not a shared-host one.
 - Each session drives the pane visible in its own view; other views' webviews are
   never touched. Calls within the same view are not locked against each other.
+- Two views showing the identical URL are indistinguishable by URL; the first
+  matching webview is used. A restore screen's stale bar never matches.
 - No HTTP-cache persistence and no pane mirroring. The cookie jar itself is
   app-wide; only the snapshot files stay per workspace.
 - Pane tools other than `browser_open` / `browser_navigate` need a visible pane.
@@ -133,7 +149,8 @@ node --test
 ```
 
 `node --test` runs the unit tests for per-view pane selection, visible-bar URL
-matching, the screenshot timeout and cookie state (no browser, no network).
+matching, restore-screen detection (shell read and opener), the screenshot
+timeout and cookie state (no browser, no network).
 
 ## License
 

@@ -6,9 +6,11 @@
  * is visible. The tools therefore drive the pane VISIBLE in the caller's view:
  * the window's visible address-bar URL is matched against that window's webview
  * targets, and `browser_open` loads the URL through the caller's visible bar.
- * Other session views' webviews are never driven. A Session not shown in any
- * window gets a clear error. Cookie snapshots stay keyed by the calling
- * Session's workspace.
+ * Other session views' webviews are never driven. A view restored from a
+ * previous process shows a "Restore page" screen whose bar is stale and which
+ * owns no webview; `browser_open` trusted-clicks Restore page first. A Session
+ * not shown in any window gets a clear error. Cookie snapshots stay keyed by the
+ * calling Session's workspace.
  *
  * A native Host plugin is required because only a Host tool sees the calling
  * Session (`exec.agent.session`); an MCP stdio server cannot tell callers apart,
@@ -106,6 +108,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
       windowTitle: win.pageTitle,
       currentSessionId: win.currentSessionId,
       visiblePaneUrl: win.visiblePaneUrl,
+      restoring: win.restoring === true,
       readError: win.readError,
       webviewCount: win.views.length,
       paneTargetId: win.pane?.id ?? null,
@@ -124,7 +127,9 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
    * window's webview ids and URLs are captured first. A fresh id means the
    * visible view spawned its pane; without one, only a pre-existing view whose
    * URL CHANGED to the refreshed visible-bar URL counts as the bar's target.
-   * A hidden view that already showed that URL stays untouched.
+   * A hidden view that already showed that URL stays untouched. A view restored
+   * from a previous process spawns its own pane when the opener trusted-clicks
+   * Restore page, so that pane is a fresh id too.
    */
   async function openPaneInCallerWindow(scope, url) {
     const window = scope.choice.callerWindow
@@ -288,8 +293,9 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   tools.push(textTool({
     name: 'browser_open',
     description: "Open the browser pane visible in this session's view, optionally loading a URL. "
-      + 'Reuses that visible pane; otherwise loads the URL through the visible address bar, which '
-      + 'spawns the pane, so a URL is required in that case.',
+      + 'Reuses that visible pane; otherwise restores a previously opened pane if its restore '
+      + 'screen is showing, then loads the URL through the visible address bar, which spawns the '
+      + 'pane, so a URL is required in that case.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Optional URL to load after opening.' } },
