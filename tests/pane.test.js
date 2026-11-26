@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createTools } from '../index.js'
-import { matchVisiblePane } from '../lib/scope.js'
+import { matchVisiblePane, matchVisiblePanes } from '../lib/scope.js'
 import { loadCookies, saveCookies } from '../lib/state.js'
 
 // Cookie restore/snapshot resolve ~/.dsh/browser-state on every call.
@@ -139,6 +139,8 @@ function harness({
     sleeps: 0,
     evaluates: [],
     connectedTargets: [],
+    readWindowOptions: [],
+    probeConnects: [],
     cookies,
     hangScreenshot,
   }
@@ -147,11 +149,17 @@ function harness({
     async fetchTargets() {
       return state.windows.flatMap((win) => [win.page, ...win.views])
     },
-    async readWindows() {
-      return state.windows.map((win) => ({
-        ...win,
-        pane: win.restoring === true ? null : matchVisiblePane(win.views, win.visiblePaneUrl),
-      }))
+    async readWindows(targets, _deps, options = {}) {
+      state.readWindowOptions.push(options)
+      return state.windows.map((win) => {
+        const candidates = win.restoring === true
+          ? []
+          : matchVisiblePanes(win.views, win.visiblePaneUrl)
+        if (candidates.length > 1 && options.probe !== false) {
+          state.probeConnects.push(...candidates.map((candidate) => candidate.id))
+        }
+        return { ...win, pane: candidates[0] ?? null }
+      })
     },
     async connect(target) {
       state.connectedTargets.push(target)
@@ -267,6 +275,28 @@ test('an unidentifiable same-URL pane fails clearly, without the browser_open re
   })
   assert.equal(h.state.openCalls.length, 0)
   assert.equal(h.state.connectedTargets.length, 0)
+})
+
+const SAME_URL = 'https://same.example/'
+
+test('open-path polling never probes while two views show the same URL', async () => {
+  // After opening, the visible view's new pane and a hidden view's pane share
+  // the URL; polling must not pay the ~2.5s capture probe on every poll.
+  const hidden = view('pane-1', { url: SAME_URL })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: '' })],
+    openPane: ({ state, win, url }) => {
+      spawnPane(state, win, url)
+      win.visiblePaneUrl = url
+    },
+  })
+
+  const output = await h.tool('browser_open').execute({ url: SAME_URL }, EXEC)
+
+  assert.equal(h.state.probeConnects.length, 0)
+  assert.ok(h.state.readWindowOptions.some((options) => options.probe === false))
+  assert.equal(h.state.connectedTargets[0].id, 'pane-2')
+  assert.match(output, /Pane pane-2/)
 })
 
 test('browser_targets and browser_scope_probe report the pane error kind', async () => {

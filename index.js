@@ -144,7 +144,9 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
     for (let i = 0; i < 25; i += 1) {
       await cdp.sleep(300)
       const targets = await cdp.fetchTargets(endpoint)
-      const windows = await cdp.readWindows(targets)
+      // Polling identifies the spawned view by target events, never by `pane`,
+      // so skip the capture probe's ~2.5s cost on every poll.
+      const windows = await cdp.readWindows(targets, {}, { probe: false })
       const refreshed = windows.find((candidate) => candidate.pageTargetId === window.pageTargetId)
       if (refreshed === undefined) continue
       const spawned = refreshed.views.filter((view) => !before.has(view.id))

@@ -620,3 +620,47 @@ test('readWindows does not probe a sole URL match', async () => {
   assert.equal(windows[0].pane.id, 'pane-visible')
   assert.equal(probeConnects, 0)
 })
+
+test('readWindows with probe:false leaves same-URL ambiguity unidentified without probing', async () => {
+  let probeConnects = 0
+  const closed = []
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    {
+      async connect(target) {
+        if (target.type === 'page') return { targetId: target.id, close() {} }
+        probeConnects += 1
+        return probeSession(target.id, closed)
+      },
+      async evaluate() {
+        return JSON.stringify(SAME_SHELL['window-1'])
+      },
+      send() {
+        throw new Error('probe send must not be reached')
+      },
+      sleep() {
+        throw new Error('probe sleep must not be reached')
+      },
+    },
+    { probe: false },
+  )
+
+  assert.equal(probeConnects, 0)
+  assert.deepEqual(closed, [])
+  assert.equal(windows[0].pane, null)
+  assert.equal(windows[0].paneError, null)
+  assert.equal(windows[0].paneErrorMessage, null)
+  assert.equal(windows[0].visiblePaneUrl, SAME)
+  assert.equal(windows[0].views.length, 2)
+})
+
+test('readWindows with an explicit probe:true still disambiguates identical URLs', async () => {
+  const windows = await readWindows(
+    [PAGE, ...SAME_VIEWS],
+    probeShellDeps({ shells: SAME_SHELL, completers: ['pane-visible'] }),
+    { probe: true },
+  )
+
+  assert.equal(windows[0].pane.id, 'pane-visible')
+  assert.equal(windows[0].paneError, null)
+})

@@ -87,6 +87,10 @@ authoritative. Within it:
     suggest `browser_open`. An ambiguous same-URL window costs up to ~2.5s per
     selection.
 
+Open-path polling skips the probe (`readWindows(…, { probe: false })`), because
+it identifies the spawned webview by target events, so the ~2.5s cost applies to
+pane reads and clicks in the ambiguous case, not to every open poll.
+
 Matching by window title (`<session title> — DeepSeek Harness`) is kept only as a
 fallback for builds where no window yields a stored session id.
 

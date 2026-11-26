@@ -69,7 +69,9 @@ therefore map it to the pane visible in its own view.
   the call fails with a clear "bring this session's DSH window to the front and
   retry" message — never a first-match guess. A sole URL match is used unprobed.
   Restore screens are the exception: their stale bar never identifies a live
-  pane and is never probed.
+  pane and is never probed. Open-path polling skips the probe (`probe: false`)
+  because it identifies the spawned webview by target events, so the ~2.5s cost
+  applies to pane reads and clicks in the ambiguous case, not to every open poll.
 - **Not displayed, no pane.** A Session shown in no open window gets a clear
   error: switch to it in a DSH window first.
 - **Screenshots are bounded.** `Page.captureScreenshot` never completes on a
