@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Workspace browser",
+    "description": "Gives one built-in browser per workspace: every session in a workspace can read and drive the page another session opened there, and nothing crosses workspaces.",
+    "detail": "docs/DETAIL.md"
+  }
+}

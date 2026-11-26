@@ -1,0 +1,5 @@
+- insert:
+    - id: workspace-browser
+      name: '@local/dsh-workspace-browser'
+      config:
+        cdpEndpoint: 'http://127.0.0.1:9222'
