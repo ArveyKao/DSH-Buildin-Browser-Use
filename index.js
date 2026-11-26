@@ -1,11 +1,15 @@
 /**
- * Workspace-scoped built-in browser control for DSH Desktop.
+ * Window-scoped built-in browser control for DSH Desktop.
  *
- * One browser per workspace: any Session in a workspace reads and drives the page
- * another Session opened there, and nothing crosses workspaces. A native Host
- * plugin is required because only a Host tool sees the calling Session
- * (`exec.agent.session`); an MCP stdio server cannot tell callers apart, which is
- * why the earlier MCP bundle drove panes belonging to other windows.
+ * The browser pane belongs to the WINDOW that hosts it: any Session displayed in
+ * that window reads and drives its pane, whichever workspace opened it. DSH lets
+ * the user switch any Session into any window, so switching sessions hands the
+ * pane over instead of orphaning it; a Session not shown in any window gets a
+ * clear error. Cookie snapshots stay keyed by the calling Session's workspace.
+ *
+ * A native Host plugin is required because only a Host tool sees the calling
+ * Session (`exec.agent.session`); an MCP stdio server cannot tell callers apart,
+ * which is why the earlier MCP bundle drove panes belonging to other windows.
  *
  * Window → Session mapping uses the exact bridge each window writes to its own
  * `localStorage['dsh.sessions.current']`, with window-title matching only as a
@@ -21,8 +25,8 @@ import { dirname, join } from 'node:path'
 
 import { connect, evaluate, fetchTargets, pressKey, sleep } from './lib/cdp.js'
 import { clickScript, openInSystemBrowser, openPaneInWindow, SNAPSHOT_SCRIPT, typeScript } from './lib/ops.js'
-import { chooseWorkspacePane, describeTargets, sessionTitle } from './lib/scope.js'
-import { bindPane, paneWorkspace, restoreCookiesOnce, snapshotCookies, workspaceKey } from './lib/state.js'
+import { chooseCallerPane, describeTargets, sessionTitle } from './lib/scope.js'
+import { restoreCookiesOnce, snapshotCookies } from './lib/state.js'
 import { readWindows } from './lib/windows.js'
 
 /** Stable Loader identity. */
@@ -79,17 +83,17 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
     const targets = await cdp.fetchTargets(endpoint)
     const windows = await cdp.readWindows(targets)
-    const choice = chooseWorkspacePane(windows, {
-      sessionIds,
-      titles,
+    const choice = chooseCallerPane(windows, {
       callerSessionId: session.id,
+      callerTitle: sessionTitle(session),
+      titles,
     })
 
     return { session, workspace, sessionIds, titles, targets, windows, choice }
   }
 
   /**
-   * Open a pane in the window chosen for this workspace, loading `url` through
+   * Open a pane in the window showing the calling Session, loading `url` through
    * its address bar, and wait for its page target.
    *
    * DSH only spawns the pane's webview CDP target once an HTTP(S) URL has been
@@ -98,7 +102,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   async function openPaneInCallerWindow(scope, url) {
     const window = scope.choice.callerWindow
     if (window === null) {
-      throw new Error(`cannot open a workspace browser: ${scope.choice.reason}`)
+      throw new Error(`cannot open a browser: ${scope.choice.reason}`)
     }
     await cdp.openPaneInWindow(window.page, url)
     for (let i = 0; i < 25; i += 1) {
@@ -113,9 +117,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   }
 
   /**
-   * Resolve the pane for one call: the workspace pane by default, or an explicit
-   * `targetId` that must name a webview pane of this workspace. Opens a pane in
-   * the workspace's window when none exists yet.
+   * Resolve the pane for one call: the pane of the caller's window by default, or
+   * an explicit `targetId` that must be hosted by that same window.
    */
   function resolvePane(scope, targetId) {
     if (targetId === undefined) return scope.choice.chosen
@@ -127,19 +130,19 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
     if (target.type !== 'webview') {
       throw new Error(`CDP target ${targetId} is a ${target.type}, not a browser pane`)
     }
-    const host = scope.windows.find((win) => win.pageTargetId === target.parentId)
-    if (typeof host?.currentSessionId === 'string' && !scope.sessionIds.includes(host.currentSessionId)) {
+    if (target.parentId !== scope.choice.callerWindow?.pageTargetId) {
       throw new Error(
-        `CDP target ${targetId} is hosted by another workspace's window; refusing to cross workspaces`,
+        `CDP target ${targetId} is not the pane of the window showing this session; ` +
+          'call browser_targets to list targets',
       )
     }
     return target
   }
 
   /**
-   * Run a callback against the workspace pane.
+   * Run a callback against the browser pane of the caller's window.
    * @param exec - tool execution context (carries the calling Session).
-   * @param args - tool arguments; `targetId` overrides the workspace pane.
+   * @param args - tool arguments; `targetId` overrides the caller-window pane.
    * @param openUrl - HTTP(S) URL used when a pane must be opened; undefined when
    *   the call may only reuse an existing pane.
    * @param callback - `(cdpSession, { pane, workspace, opened }) => value`;
@@ -148,7 +151,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   async function withPane(exec, args, openUrl, callback) {
     const scope = await resolveScope(exec)
     if (scope.workspace === undefined) {
-      throw new Error('this Session is not attached to a workspace yet, so no workspace browser exists')
+      throw new Error('this Session is not attached to a workspace yet, so cookies cannot be stored')
     }
 
     let pane = resolvePane(scope, args.targetId)
@@ -158,25 +161,12 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
         // Opening an empty pane yields no webview target, so waiting for one
         // only burns the timeout; fail fast and name the tool that can open it.
         throw new Error(
-          'no browser pane is open in this workspace; call browser_open with an HTTP(S) url first',
+          'no browser pane is open in this window; call browser_open with an HTTP(S) url first',
         )
       }
       pane = await openPaneInCallerWindow(scope, openUrl)
       opened = true
     }
-
-    // A pane lives in a window, and that window's Session can change to one from
-    // another workspace. Bind the pane to the workspace that first used it and
-    // refuse to drive a pane belonging to a different workspace.
-    const key = workspaceKey(scope.workspace)
-    const bound = paneWorkspace(pane.id)
-    if (bound !== undefined && bound !== key) {
-      throw new Error(
-        `the open browser pane belongs to another workspace (${bound}); ` +
-          'close it or switch back to that workspace — refusing to cross workspaces',
-      )
-    }
-    bindPane(pane.id, scope.workspace)
 
     const session = await cdp.connect(pane)
     try {
@@ -211,14 +201,14 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   const targetIdParameter = {
     type: 'string',
-    description: 'Optional CDP target id to override the workspace pane.',
+    description: 'Optional CDP target id; it must be the pane of the window showing this session.',
   }
 
   tools.push(textTool({
     name: 'browser_targets',
     description: 'List DSH windows, the Session each window shows, and the browser pane each hosts, '
       + 'plus every CDP target. Use it to confirm the built-in browser is reachable and to see '
-      + 'which window holds the workspace page.',
+      + 'which window holds the pane this session drives.',
     async execute(_args, exec) {
       const scope = await resolveScope(exec)
       const report = {
@@ -234,6 +224,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
           readError: win.readError,
           paneTargetId: win.pane?.id ?? null,
           paneUrl: win.pane?.url ?? null,
+          showsCaller: win.currentSessionId === scope.session.id,
           workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
         })),
         targets: describeTargets(scope.targets),
@@ -245,8 +236,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   tools.push(textTool({
     name: 'browser_scope_probe',
     description: 'Report the calling Session, its workspace, every window with the Session it shows, '
-      + 'the pane the workspace-scoped algorithm chooses, and why. Use it to diagnose why a browser '
-      + 'action landed in the wrong window or found no pane.',
+      + 'the pane the caller-window algorithm chooses, and why. Use it to diagnose why a browser '
+      + 'action found no pane or landed in the wrong window.',
     async execute(_args, exec) {
       const scope = await resolveScope(exec)
       const report = {
@@ -264,6 +255,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
           readError: win.readError,
           paneTargetId: win.pane?.id ?? null,
           paneUrl: win.pane?.url ?? null,
+          showsCaller: win.currentSessionId === scope.session.id,
           workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
         })),
         chosenPane: scope.choice.chosen === null
@@ -279,8 +271,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_open',
-    description: 'Open the workspace browser, optionally loading a URL. Reuses the pane another Session '
-      + 'of this workspace opened; otherwise opens one in a DSH window of this workspace, which requires a URL.',
+    description: 'Open the browser pane of the window showing this session, optionally loading a URL. '
+      + 'Reuses that window\'s pane, whichever workspace opened it; otherwise opens one, which requires a URL.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Optional URL to load after opening.' } },
@@ -309,7 +301,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_attach',
-    description: 'Report the pane that workspace-scoped calls use, without navigating. Attaching is '
+    description: 'Report the pane this session drives, without navigating. Attaching is '
       + 'implicit for every other browser tool.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
@@ -323,8 +315,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_navigate',
-    description: 'Navigate the workspace pane to a URL. Opens a pane in the workspace\'s window '
-      + 'when the workspace has none; a freshly opened pane loads the URL through its address bar.',
+    description: 'Navigate the browser pane of the window showing this session to a URL. Opens a pane '
+      + 'there when the window has none; a freshly opened pane loads the URL through its address bar.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'URL to load.' }, targetId: targetIdParameter },
@@ -377,7 +369,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_snapshot',
-    description: 'Read the workspace pane: URL, title, visible text, links and form fields.',
+    description: 'Read the browser pane of the window showing this session: URL, title, visible text, '
+      + 'links and form fields.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
       const result = await withPane(exec, args, undefined, async (session) => cdp.evaluate(session, SNAPSHOT_SCRIPT))
@@ -387,7 +380,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_click',
-    description: 'Click the first element matching a CSS selector in the workspace pane.',
+    description: 'Click the first element matching a CSS selector in the pane of the window showing this session.',
     parameters: {
       type: 'object',
       properties: { selector: { type: 'string', description: 'CSS selector.' }, targetId: targetIdParameter },
@@ -406,7 +399,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_type',
-    description: 'Set an input value in the workspace pane and fire input/change, optionally pressing Enter.',
+    description: 'Set an input value in the pane of the window showing this session and fire '
+      + 'input/change, optionally pressing Enter.',
     parameters: {
       type: 'object',
       properties: {
@@ -434,7 +428,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_evaluate',
-    description: 'Evaluate a JavaScript expression in the workspace pane and return its value.',
+    description: 'Evaluate a JavaScript expression in the pane of the window showing this session and '
+      + 'return its value.',
     parameters: {
       type: 'object',
       properties: { expression: { type: 'string', description: 'Expression to evaluate.' }, targetId: targetIdParameter },
@@ -453,7 +448,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_screenshot',
-    description: 'Capture a PNG of the workspace pane and save it under ~/.dsh/browser-state/shots.',
+    description: 'Capture a PNG of the pane of the window showing this session and save it under '
+      + '~/.dsh/browser-state/shots.',
     parameters: {
       type: 'object',
       properties: { filePath: { type: 'string', description: 'Optional absolute output path.' }, targetId: targetIdParameter },

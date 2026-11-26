@@ -2,13 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  chooseWorkspacePane,
+  chooseCallerPane,
   describeTargets,
   sessionTitle,
   windowSessionTitle,
 } from '../lib/scope.js'
 
-/** A workspace window record shaped like `readWindows` output. */
+/** A window record shaped like `readWindows` output. */
 function windowRecord({ id = 'window', sessionId = null, paneId = null, title = '' }) {
   return {
     pageTargetId: id,
@@ -20,90 +20,100 @@ function windowRecord({ id = 'window', sessionId = null, paneId = null, title = 
   }
 }
 
-test('chooseWorkspacePane prefers the caller window pane', () => {
+test('chooseCallerPane chooses the pane of the window showing the caller', () => {
   const windows = [
     windowRecord({ id: 'w2', sessionId: 's2', paneId: 'pane-2' }),
     windowRecord({ id: 'w1', sessionId: 's1', paneId: 'pane-1' }),
   ]
-  const choice = chooseWorkspacePane(windows, { sessionIds: ['s1', 's2'], callerSessionId: 's1' })
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1' })
   assert.equal(choice.chosen.id, 'pane-1')
   assert.equal(choice.callerWindow.pageTargetId, 'w1')
   assert.equal(choice.matchedBy, 'session-id')
+  assert.match(choice.reason, /caller's own window/)
 })
 
-test('chooseWorkspacePane shares a pane from another window of the same workspace', () => {
+test('chooseCallerPane reports the caller window when it has no pane yet', () => {
   const windows = [
-    windowRecord({ id: 'w1', sessionId: 's1' }),
     windowRecord({ id: 'w2', sessionId: 's2', paneId: 'pane-2' }),
+    windowRecord({ id: 'w1', sessionId: 's1' }),
   ]
-  const choice = chooseWorkspacePane(windows, { sessionIds: ['s1', 's2'], callerSessionId: 's1' })
-  assert.equal(choice.chosen.id, 'pane-2')
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1' })
+  assert.equal(choice.chosen, null)
   assert.equal(choice.callerWindow.pageTargetId, 'w1')
+  assert.equal(choice.matchedBy, 'session-id')
+  assert.match(choice.reason, /no browser pane yet/)
+})
+
+test('chooseCallerPane never borrows the pane of another window', () => {
+  const windows = [
+    windowRecord({ id: 'w2', sessionId: 's2', paneId: 'pane-2' }),
+    windowRecord({ id: 'w1', sessionId: 's1' }),
+  ]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1' })
+  assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow.pageTargetId, 'w1')
+})
+
+test('chooseCallerPane fails clearly when the caller is displayed in no window', () => {
+  const windows = [windowRecord({ id: 'w2', sessionId: 's2', paneId: 'pane-2' })]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', callerTitle: 'Mine' })
+  assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow, null)
+  assert.equal(choice.matchedBy, 'session-id')
+  assert.match(choice.reason, /not displayed in any open window; switch to it in a DSH window first/)
+})
+
+test('chooseCallerPane is not filtered by workspace: a window showing the caller hosts its pane', () => {
+  // The pane may have been opened by any workspace; the displayed session decides.
+  const windows = [
+    windowRecord({ id: 'gms-window', sessionId: 'gms-session', paneId: 'pane-gms' }),
+    windowRecord({ id: 'shared-window', sessionId: 'yl-session', paneId: 'pane-yle' }),
+  ]
+  const choice = chooseCallerPane(windows, { callerSessionId: 'yl-session' })
+  assert.equal(choice.chosen.id, 'pane-yle')
+  assert.equal(choice.callerWindow.pageTargetId, 'shared-window')
   assert.equal(choice.matchedBy, 'session-id')
 })
 
-test('chooseWorkspacePane reports no pane and a host window when the workspace has none', () => {
-  const windows = [windowRecord({ id: 'w1', sessionId: 's1' })]
-  const choice = chooseWorkspacePane(windows, { sessionIds: ['s1'], callerSessionId: 's1' })
-  assert.equal(choice.chosen, null)
-  assert.equal(choice.callerWindow.pageTargetId, 'w1')
-  assert.match(choice.reason, /no browser pane/)
-})
-
-test('chooseWorkspacePane picks a host window of the workspace when the caller is not displayed', () => {
-  const windows = [windowRecord({ id: 'w2', sessionId: 's2' })]
-  const choice = chooseWorkspacePane(windows, { sessionIds: ['s1', 's2'], callerSessionId: 's1' })
-  assert.equal(choice.chosen, null)
-  assert.equal(choice.callerWindow.pageTargetId, 'w2')
-})
-
-test('chooseWorkspacePane never chooses a pane from another workspace', () => {
-  const windows = [
-    windowRecord({ id: 'w9', sessionId: 'other-1', paneId: 'pane-9' }),
-    windowRecord({ id: 'w1', sessionId: 's1' }),
-  ]
-  const choice = chooseWorkspacePane(windows, { sessionIds: ['s1'], callerSessionId: 's1' })
-  assert.equal(choice.chosen, null)
-  assert.equal(choice.callerWindow.pageTargetId, 'w1')
-})
-
-test('chooseWorkspacePane falls back to title matching when no session id is readable', () => {
+test('chooseCallerPane falls back to the window title only when no session id is readable', () => {
   const windows = [
     windowRecord({ id: 'w1', sessionId: null, paneId: 'pane-1', title: 'Docs — DeepSeek Harness' }),
   ]
-  const choice = chooseWorkspacePane(windows, {
-    sessionIds: ['s1'],
-    callerSessionId: 's1',
-    titles: { s1: 'Docs' },
-  })
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', callerTitle: 'Docs' })
   assert.equal(choice.chosen.id, 'pane-1')
+  assert.equal(choice.callerWindow.pageTargetId, 'w1')
   assert.equal(choice.matchedBy, 'title')
 })
 
-test('chooseWorkspacePane does not fall back to titles while any session id is readable', () => {
-  const windows = [
-    windowRecord({ id: 'w9', sessionId: 'other-1' }),
-    windowRecord({ id: 'w1', sessionId: null, paneId: 'pane-1', title: 'Docs — DeepSeek Harness' }),
-  ]
-  const choice = chooseWorkspacePane(windows, {
-    sessionIds: ['s1'],
-    callerSessionId: 's1',
-    titles: { s1: 'Docs' },
-  })
+test('chooseCallerPane title fallback reports a titled window with no pane', () => {
+  const windows = [windowRecord({ id: 'w1', sessionId: null, title: 'Docs — DeepSeek Harness' })]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', titles: { s1: 'Docs' } })
   assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow.pageTargetId, 'w1')
+  assert.equal(choice.matchedBy, 'title')
+  assert.match(choice.reason, /no browser pane yet/)
 })
 
-test('chooseWorkspacePane ignores title matches from another workspace title', () => {
+test('chooseCallerPane ignores titles while any window yields a session id', () => {
+  const windows = [
+    windowRecord({ id: 'w2', sessionId: 'other-1' }),
+    windowRecord({ id: 'w1', sessionId: null, paneId: 'pane-1', title: 'Docs — DeepSeek Harness' }),
+  ]
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', callerTitle: 'Docs' })
+  assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow, null)
+  assert.equal(choice.matchedBy, 'session-id')
+})
+
+test('chooseCallerPane title fallback misses when no window is titled for the caller', () => {
   const windows = [
     windowRecord({ id: 'w1', sessionId: null, paneId: 'pane-1', title: 'Other — DeepSeek Harness' }),
   ]
-  const choice = chooseWorkspacePane(windows, {
-    sessionIds: ['s1'],
-    callerSessionId: 's1',
-    titles: { s1: 'Docs' },
-  })
+  const choice = chooseCallerPane(windows, { callerSessionId: 's1', callerTitle: 'Docs' })
   assert.equal(choice.chosen, null)
+  assert.equal(choice.callerWindow, null)
   assert.equal(choice.matchedBy, 'title')
+  assert.match(choice.reason, /not displayed in any open window; switch to it in a DSH window first/)
 })
 
 test('windowSessionTitle strips only the product suffix', () => {

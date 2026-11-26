@@ -5,9 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import {
-  bindPane,
   loadCookies,
-  paneWorkspace,
   restoreCookiesOnce,
   saveCookies,
   snapshotCookies,
@@ -62,14 +60,6 @@ test('workspaceStatePath lives under the per-workspace state directory', () => {
     workspaceStatePath(workspace),
     join(home, '.dsh', 'browser-state', `${workspaceKey(workspace)}.json`),
   )
-})
-
-test('pane bindings are per pane and compare by workspace key', () => {
-  assert.equal(paneWorkspace('pane-unbound'), undefined)
-  bindPane('pane-1', { id: 'bind-a' })
-  assert.equal(paneWorkspace('pane-1'), workspaceKey({ id: 'bind-a' }))
-  assert.notEqual(paneWorkspace('pane-1'), workspaceKey({ id: 'bind-b' }))
-  assert.equal(paneWorkspace('pane-2'), undefined)
 })
 
 test('snapshot then restore round-trips cookies for one workspace', async () => {
