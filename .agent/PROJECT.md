@@ -28,10 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- In flight: fix task for pane-spawn regression found in live smoke. `browser_open` fails ("pane opened but no page target appeared"): hardening dropped the URL arg from `openPaneInCallerWindow` → `openPaneInWindow`; DSH spawns the webview target only after an HTTP(S) URL is typed in the pane address bar (verified live; about:blank rejected). Prototype passed the URL through. Worker fix dispatched (restore openUrl flow + skip double navigation + clear error for URL-less spawn).
-- Accepted: implement task `tsk_f084a8a9` verified (42/42 tests) and applied; committed `672abe8`, pushed. Goal checks pass (`goal_ba37c1c5`).
-- Armed: profile links `@local/dsh-workspace-browser` → this repo; plugin confirmed live in restarted DSH (tools registered, agent called browser_open/browser_scope_probe; LLM key resolved via host credential broker `~/.dsh/.credentials.yaml` refs, not process env).
-- Next: verify/accept/apply fix → restart DSH (fresh, no pane) → session A browser_open example.com (spawn path) → session B browser_snapshot same pane → test cookie via browser_evaluate + snapshot file check → restart → restore-on-first-call. Record receipts, `dispatch goal done`.
+- Complete: live smoke passed all goal criteria (2026-11-26, receipt `changes/pane-spawn-fix/evidence/live-smoke.md`). Pane-spawn regression fixed (`abdf078`): URL pass-through restored, no double navigation, fail-fast URL-less error; 49/49 unit tests. Two sessions in deploy-gms shared one pane (A opened example.com, B snapshot read it); test cookie survived a DSH restart (`cookies restored: restored, persisted: 1`, document.cookie round-trip), then cleaned up (snapshot now empty).
+- Accepted: implement `tsk_f084a8a9` (672abe8) + fix `tsk_a6a7d30d` (abdf078), both verified and applied. Goal `goal_3cbefe11` (checks use portable `node --test`; the `tests/` dir-arg form is broken on homebrew Node 24.6.0).
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; plugin live in DSH (LLM key resolved via host credential broker, not process env).
+- Note: first smoke prompt landed in the user's restored session-2a80ad35 (2 harmless turns); session B = session-0c81b1b0 is a fresh smoke session. Real SSO login remains the user's step in real use.
 
 ## Target applicability and access
 
