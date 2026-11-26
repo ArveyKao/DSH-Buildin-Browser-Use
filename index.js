@@ -1,11 +1,14 @@
 /**
- * Window-scoped built-in browser control for DSH Desktop.
+ * Per-session-view built-in browser control for DSH Desktop.
  *
- * The browser pane belongs to the WINDOW that hosts it: any Session displayed in
- * that window reads and drives its pane, whichever workspace opened it. DSH lets
- * the user switch any Session into any window, so switching sessions hands the
- * pane over instead of orphaning it; a Session not shown in any window gets a
- * clear error. Cookie snapshots stay keyed by the calling Session's workspace.
+ * DSH keeps one browser-pane UI per session VIEW: each view in a window has its
+ * own address bar and webview target, and only the view the user is looking at
+ * is visible. The tools therefore drive the pane VISIBLE in the caller's view:
+ * the window's visible address-bar URL is matched against that window's webview
+ * targets, and `browser_open` loads the URL through the caller's visible bar.
+ * Other session views' webviews are never driven. A Session not shown in any
+ * window gets a clear error. Cookie snapshots stay keyed by the calling
+ * Session's workspace.
  *
  * A native Host plugin is required because only a Host tool sees the calling
  * Session (`exec.agent.session`); an MCP stdio server cannot tell callers apart,
@@ -25,7 +28,7 @@ import { dirname, join } from 'node:path'
 
 import { connect, evaluate, fetchTargets, pressKey, sleep } from './lib/cdp.js'
 import { clickScript, openInSystemBrowser, openPaneInWindow, SNAPSHOT_SCRIPT, typeScript } from './lib/ops.js'
-import { chooseCallerPane, describeTargets, sessionTitle } from './lib/scope.js'
+import { chooseCallerPane, describeTargets, matchVisiblePane, sessionTitle } from './lib/scope.js'
 import { restoreCookiesOnce, snapshotCookies } from './lib/state.js'
 import { readWindows } from './lib/windows.js'
 
@@ -36,6 +39,10 @@ export const name = 'workspace-browser'
 export const inject = ['tools']
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:9222'
+
+/** `Page.captureScreenshot` never completes on a hidden webview, so bound it. */
+const SCREENSHOT_TIMEOUT_MS = 15000
+const SCREENSHOT_TIMED_OUT = Symbol('screenshot-timed-out')
 
 /** CDP operations the tools use; tests replace this bundle with doubles. */
 const DEFAULT_CDP = {
@@ -92,33 +99,61 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
     return { session, workspace, sessionIds, titles, targets, windows, choice }
   }
 
+  /** Window rows shared by the listing/diagnostic tools. */
+  function describeWindows(scope) {
+    return scope.windows.map((win) => ({
+      pageTargetId: win.pageTargetId,
+      windowTitle: win.pageTitle,
+      currentSessionId: win.currentSessionId,
+      visiblePaneUrl: win.visiblePaneUrl,
+      readError: win.readError,
+      webviewCount: win.views.length,
+      paneTargetId: win.pane?.id ?? null,
+      paneUrl: win.pane?.url ?? null,
+      showsCaller: win.currentSessionId === scope.session.id,
+      workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
+    }))
+  }
+
   /**
-   * Open a pane in the window showing the calling Session, loading `url` through
-   * its address bar, and wait for its page target.
+   * Open a pane in the session view showing the calling Session by loading `url`
+   * through that view's VISIBLE address bar, then wait for its webview target.
    *
-   * DSH only spawns the pane's webview CDP target once an HTTP(S) URL has been
-   * loaded, so waiting after opening an empty pane can never succeed.
+   * DSH only spawns a pane's webview CDP target once an HTTP(S) URL has been
+   * loaded, so waiting after opening an empty pane can never succeed. The
+   * window's webview ids and URLs are captured first. A fresh id means the
+   * visible view spawned its pane; without one, only a pre-existing view whose
+   * URL CHANGED to the refreshed visible-bar URL counts as the bar's target.
+   * A hidden view that already showed that URL stays untouched.
    */
   async function openPaneInCallerWindow(scope, url) {
     const window = scope.choice.callerWindow
     if (window === null) {
       throw new Error(`cannot open a browser: ${scope.choice.reason}`)
     }
+    const before = new Map(window.views.map((view) => [view.id, view.url ?? '']))
     await cdp.openPaneInWindow(window.page, url)
     for (let i = 0; i < 25; i += 1) {
       await cdp.sleep(300)
       const targets = await cdp.fetchTargets(endpoint)
-      const pane = targets.find(
-        (target) => target.type === 'webview' && target.parentId === window.pageTargetId,
-      )
-      if (pane) return pane
+      const windows = await cdp.readWindows(targets)
+      const refreshed = windows.find((candidate) => candidate.pageTargetId === window.pageTargetId)
+      if (refreshed === undefined) continue
+      const spawned = refreshed.views.filter((view) => !before.has(view.id))
+      if (spawned.length > 0) {
+        return matchVisiblePane(spawned, refreshed.visiblePaneUrl) ?? spawned[0]
+      }
+      const matched = matchVisiblePane(refreshed.views, refreshed.visiblePaneUrl)
+      if (matched !== null && (matched.url ?? '') !== (before.get(matched.id) ?? '')) {
+        return matched
+      }
     }
     throw new Error('the browser pane opened but no page target appeared')
   }
 
   /**
-   * Resolve the pane for one call: the pane of the caller's window by default, or
-   * an explicit `targetId` that must be hosted by that same window.
+   * Resolve the pane for one call: the pane visible in the caller's session view
+   * by default, or an explicit `targetId` that must be that same pane.
    */
   function resolvePane(scope, targetId) {
     if (targetId === undefined) return scope.choice.chosen
@@ -130,19 +165,18 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
     if (target.type !== 'webview') {
       throw new Error(`CDP target ${targetId} is a ${target.type}, not a browser pane`)
     }
-    if (target.parentId !== scope.choice.callerWindow?.pageTargetId) {
+    if (target.id !== scope.choice.chosen?.id) {
       throw new Error(
-        `CDP target ${targetId} is not the pane of the window showing this session; ` +
-          'call browser_targets to list targets',
+        `CDP target ${targetId} is not this session's browser pane; call browser_targets to list targets`,
       )
     }
     return target
   }
 
   /**
-   * Run a callback against the browser pane of the caller's window.
+   * Run a callback against the browser pane visible in the caller's session view.
    * @param exec - tool execution context (carries the calling Session).
-   * @param args - tool arguments; `targetId` overrides the caller-window pane.
+   * @param args - tool arguments; `targetId` overrides the caller's visible pane.
    * @param openUrl - HTTP(S) URL used when a pane must be opened; undefined when
    *   the call may only reuse an existing pane.
    * @param callback - `(cdpSession, { pane, workspace, opened }) => value`;
@@ -161,7 +195,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
         // Opening an empty pane yields no webview target, so waiting for one
         // only burns the timeout; fail fast and name the tool that can open it.
         throw new Error(
-          'no browser pane is open in this window; call browser_open with an HTTP(S) url first',
+          "no browser pane is visible in this session's view; call browser_open with an HTTP(S) url first",
         )
       }
       pane = await openPaneInCallerWindow(scope, openUrl)
@@ -201,14 +235,14 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   const targetIdParameter = {
     type: 'string',
-    description: 'Optional CDP target id; it must be the pane of the window showing this session.',
+    description: "Optional CDP target id; it must be the pane visible in this session's view.",
   }
 
   tools.push(textTool({
     name: 'browser_targets',
-    description: 'List DSH windows, the Session each window shows, and the browser pane each hosts, '
-      + 'plus every CDP target. Use it to confirm the built-in browser is reachable and to see '
-      + 'which window holds the pane this session drives.',
+    description: 'List DSH windows, the Session each window shows, the visible pane URL and every '
+      + 'webview each window hosts, plus every CDP target. Use it to confirm the built-in browser '
+      + "is reachable and to see which webview is the pane visible in this session's view.",
     async execute(_args, exec) {
       const scope = await resolveScope(exec)
       const report = {
@@ -217,16 +251,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
         workspace: scope.workspace === undefined
           ? null
           : { id: scope.workspace.id ?? null, path: scope.workspace.path ?? null, sessionIds: scope.sessionIds },
-        windows: scope.windows.map((win) => ({
-          pageTargetId: win.pageTargetId,
-          windowTitle: win.pageTitle,
-          currentSessionId: win.currentSessionId,
-          readError: win.readError,
-          paneTargetId: win.pane?.id ?? null,
-          paneUrl: win.pane?.url ?? null,
-          showsCaller: win.currentSessionId === scope.session.id,
-          workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
-        })),
+        windows: describeWindows(scope),
         targets: describeTargets(scope.targets),
       }
       return JSON.stringify(report, null, 2)
@@ -236,8 +261,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
   tools.push(textTool({
     name: 'browser_scope_probe',
     description: 'Report the calling Session, its workspace, every window with the Session it shows, '
-      + 'the pane the caller-window algorithm chooses, and why. Use it to diagnose why a browser '
-      + 'action found no pane or landed in the wrong window.',
+      + "each window's visible pane URL and webview count, the pane visible in the caller's view, "
+      + 'and why. Use it to diagnose why a browser action found no pane or landed in the wrong view.',
     async execute(_args, exec) {
       const scope = await resolveScope(exec)
       const report = {
@@ -248,16 +273,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
           ? null
           : { id: scope.workspace.id ?? null, path: scope.workspace.path ?? null, sessionIds: scope.sessionIds },
         workspaceSessionTitles: scope.titles,
-        windows: scope.windows.map((win) => ({
-          pageTargetId: win.pageTargetId,
-          windowTitle: win.pageTitle,
-          currentSessionId: win.currentSessionId,
-          readError: win.readError,
-          paneTargetId: win.pane?.id ?? null,
-          paneUrl: win.pane?.url ?? null,
-          showsCaller: win.currentSessionId === scope.session.id,
-          workspaceMatch: win.currentSessionId !== null && scope.sessionIds.includes(win.currentSessionId),
-        })),
+        windows: describeWindows(scope),
         chosenPane: scope.choice.chosen === null
           ? null
           : { id: scope.choice.chosen.id, url: scope.choice.chosen.url, title: scope.choice.chosen.title },
@@ -271,8 +287,9 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_open',
-    description: 'Open the browser pane of the window showing this session, optionally loading a URL. '
-      + 'Reuses that window\'s pane, whichever workspace opened it; otherwise opens one, which requires a URL.',
+    description: "Open the browser pane visible in this session's view, optionally loading a URL. "
+      + 'Reuses that visible pane; otherwise loads the URL through the visible address bar, which '
+      + 'spawns the pane, so a URL is required in that case.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'Optional URL to load after opening.' } },
@@ -301,7 +318,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_attach',
-    description: 'Report the pane this session drives, without navigating. Attaching is '
+    description: "Report the pane visible in this session's view, without navigating. Attaching is "
       + 'implicit for every other browser tool.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
@@ -315,8 +332,8 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_navigate',
-    description: 'Navigate the browser pane of the window showing this session to a URL. Opens a pane '
-      + 'there when the window has none; a freshly opened pane loads the URL through its address bar.',
+    description: "Navigate the browser pane visible in this session's view to a URL. When that view "
+      + 'has no pane yet, opens one by loading the URL through its visible address bar.',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string', description: 'URL to load.' }, targetId: targetIdParameter },
@@ -369,7 +386,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_snapshot',
-    description: 'Read the browser pane of the window showing this session: URL, title, visible text, '
+    description: "Read the browser pane visible in this session's view: URL, title, visible text, "
       + 'links and form fields.',
     parameters: { type: 'object', properties: { targetId: targetIdParameter }, additionalProperties: false },
     async execute(args, exec) {
@@ -380,7 +397,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_click',
-    description: 'Click the first element matching a CSS selector in the pane of the window showing this session.',
+    description: "Click the first element matching a CSS selector in the pane visible in this session's view.",
     parameters: {
       type: 'object',
       properties: { selector: { type: 'string', description: 'CSS selector.' }, targetId: targetIdParameter },
@@ -399,7 +416,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_type',
-    description: 'Set an input value in the pane of the window showing this session and fire '
+    description: "Set an input value in the pane visible in this session's view and fire "
       + 'input/change, optionally pressing Enter.',
     parameters: {
       type: 'object',
@@ -428,7 +445,7 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_evaluate',
-    description: 'Evaluate a JavaScript expression in the pane of the window showing this session and '
+    description: "Evaluate a JavaScript expression in the pane visible in this session's view and "
       + 'return its value.',
     parameters: {
       type: 'object',
@@ -448,8 +465,9 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
 
   tools.push(textTool({
     name: 'browser_screenshot',
-    description: 'Capture a PNG of the pane of the window showing this session and save it under '
-      + '~/.dsh/browser-state/shots.',
+    description: "Capture a PNG of the pane visible in this session's view and save it under "
+      + '~/.dsh/browser-state/shots. Fails after 15s with a clear error when that pane is hidden; '
+      + 'switch to this session in its DSH window and retry.',
     parameters: {
       type: 'object',
       properties: { filePath: { type: 'string', description: 'Optional absolute output path.' }, targetId: targetIdParameter },
@@ -460,7 +478,18 @@ export function createTools({ ctx, endpoint = DEFAULT_ENDPOINT, cdp = DEFAULT_CD
         throw new Error('filePath must be a non-empty string')
       }
       const result = await withPane(exec, args, undefined, async (session) => {
-        const shot = await session.send('Page.captureScreenshot', { format: 'png' })
+        // A hidden webview produces no frames, so a bare send can hang the whole
+        // turn; `withPane`'s finally closes the session and rejects the send.
+        const shot = await Promise.race([
+          session.send('Page.captureScreenshot', { format: 'png' }),
+          cdp.sleep(SCREENSHOT_TIMEOUT_MS).then(() => SCREENSHOT_TIMED_OUT),
+        ])
+        if (shot === SCREENSHOT_TIMED_OUT) {
+          throw new Error(
+            'screenshot timed out after 15s; the pane may be hidden — switch to this session in its '
+              + 'DSH window and retry',
+          )
+        }
         const path = typeof args.filePath === 'string'
           ? args.filePath
           : join(homedir(), '.dsh', 'browser-state', 'shots', `shot-${Date.now()}.png`)

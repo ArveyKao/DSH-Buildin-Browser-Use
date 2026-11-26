@@ -4,21 +4,71 @@ import assert from 'node:assert/strict'
 import {
   chooseCallerPane,
   describeTargets,
+  matchVisiblePane,
   sessionTitle,
   windowSessionTitle,
 } from '../lib/scope.js'
 
 /** A window record shaped like `readWindows` output. */
 function windowRecord({ id = 'window', sessionId = null, paneId = null, title = '' }) {
+  const pane = paneId === null
+    ? null
+    : { id: paneId, type: 'webview', parentId: id, url: `https://${paneId}.example/`, title: paneId }
   return {
     pageTargetId: id,
     pageTitle: title,
     page: { id, type: 'page', title },
     currentSessionId: sessionId,
+    visiblePaneUrl: pane?.url ?? null,
     readError: null,
-    pane: paneId === null ? null : { id: paneId, type: 'webview', url: `https://${paneId}.example/`, title: paneId },
+    views: pane === null ? [] : [pane],
+    pane,
   }
 }
+
+test('matchVisiblePane matches a URL across trailing-slash and host-case differences', () => {
+  const views = [
+    { id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://example.org/docs/' },
+    { id: 'pane-b', type: 'webview', parentId: 'window', url: 'https://EXAMPLE.org/Other' },
+  ]
+  assert.equal(matchVisiblePane(views, 'https://example.org/docs').id, 'pane-a')
+  assert.equal(matchVisiblePane(views, 'https://example.org/docs/').id, 'pane-a')
+  assert.equal(matchVisiblePane(views, 'https://example.org/Other').id, 'pane-b')
+})
+
+test('matchVisiblePane keeps the root path slash insignificant', () => {
+  const views = [{ id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://example.org/' }]
+  assert.equal(matchVisiblePane(views, 'https://example.org').id, 'pane-a')
+  assert.equal(matchVisiblePane(views, 'https://example.org/').id, 'pane-a')
+})
+
+test('matchVisiblePane requires search params to match', () => {
+  const views = [{ id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://x.test/search?q=a' }]
+  assert.equal(matchVisiblePane(views, 'https://x.test/search?q=a').id, 'pane-a')
+  assert.equal(matchVisiblePane(views, 'https://x.test/search?q=b'), null)
+  assert.equal(matchVisiblePane(views, 'https://x.test/search'), null)
+})
+
+test('matchVisiblePane returns the first matching view and null on misses', () => {
+  const views = [
+    { id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://x.test/same' },
+    { id: 'pane-b', type: 'webview', parentId: 'window', url: 'https://x.test/same' },
+    { id: 'pane-c', type: 'webview', parentId: 'window', url: 'https://x.test/other' },
+  ]
+  assert.equal(matchVisiblePane(views, 'https://x.test/same').id, 'pane-a')
+  assert.equal(matchVisiblePane(views, 'https://x.test/missing'), null)
+})
+
+test('matchVisiblePane treats null, empty and invalid URLs as no match', () => {
+  const views = [{ id: 'pane-a', type: 'webview', parentId: 'window', url: 'https://x.test/' }]
+  assert.equal(matchVisiblePane(views, null), null)
+  assert.equal(matchVisiblePane(views, ''), null)
+  assert.equal(matchVisiblePane(views, '   '), null)
+  assert.equal(matchVisiblePane(views, 'not a url'), null)
+  assert.equal(matchVisiblePane([], 'https://x.test/'), null)
+  assert.equal(matchVisiblePane([{ id: 'bad', type: 'webview', url: 'nope' }], 'https://x.test/'), null)
+})
+
 
 test('chooseCallerPane chooses the pane of the window showing the caller', () => {
   const windows = [
@@ -29,7 +79,7 @@ test('chooseCallerPane chooses the pane of the window showing the caller', () =>
   assert.equal(choice.chosen.id, 'pane-1')
   assert.equal(choice.callerWindow.pageTargetId, 'w1')
   assert.equal(choice.matchedBy, 'session-id')
-  assert.match(choice.reason, /caller's own window/)
+  assert.match(choice.reason, /caller's session view/)
 })
 
 test('chooseCallerPane reports the caller window when it has no pane yet', () => {
@@ -41,7 +91,7 @@ test('chooseCallerPane reports the caller window when it has no pane yet', () =>
   assert.equal(choice.chosen, null)
   assert.equal(choice.callerWindow.pageTargetId, 'w1')
   assert.equal(choice.matchedBy, 'session-id')
-  assert.match(choice.reason, /no browser pane yet/)
+  assert.match(choice.reason, /no pane is visible/)
 })
 
 test('chooseCallerPane never borrows the pane of another window', () => {
@@ -91,7 +141,7 @@ test('chooseCallerPane title fallback reports a titled window with no pane', () 
   assert.equal(choice.chosen, null)
   assert.equal(choice.callerWindow.pageTargetId, 'w1')
   assert.equal(choice.matchedBy, 'title')
-  assert.match(choice.reason, /no browser pane yet/)
+  assert.match(choice.reason, /no visible pane yet/)
 })
 
 test('chooseCallerPane ignores titles while any window yields a session id', () => {

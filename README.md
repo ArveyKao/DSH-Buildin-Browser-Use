@@ -3,11 +3,12 @@
 A DSH Desktop (DeepSeek Harness) plugin bundle that, once armed, gives the agent
 tools to drive DSH's built-in browser pane over the Chrome DevTools Protocol (CDP).
 
-The pane belongs to the **window** that hosts it: any Session displayed in that
-window reads and drives its pane, whichever workspace opened it. DSH lets you
-switch any Session into any window, so switching sessions hands the pane over
-instead of orphaning it. Cookie files are snapshotted per workspace and restored
-after a DSH restart.
+DSH keeps one browser pane **per session view**. The plugin drives the pane that
+is VISIBLE in the calling Session's own view: it matches the window's visible
+address-bar URL against that window's webview targets, and `browser_open` /
+`browser_navigate` load the URL through that visible bar. Other sessions'
+webviews (alive but hidden) are never driven. Cookie snapshot files stay per
+workspace.
 
 ## Why CDP
 
@@ -18,33 +19,47 @@ the plugin attaches to. The installed app is not modified.
 
 The plugin is a native Host cordis bundle (`index.js` + `lib/`), not an MCP
 server: only a Host tool sees the calling Session (`exec.agent.session`) and can
-therefore map it to the window displaying it.
+therefore map it to the pane visible in its own view.
 
-## Sharing model
+## Per-session-view pane model
 
-- **One pane per window.** Every Session displayed in a window drives that
-  window's pane, regardless of which workspace opened it. Switching the window to
-  another workspace's Session hands the pane over instead of refusing it.
-- **Window → Session mapping.** Each DSH window stores the Session it displays in
-  `localStorage['dsh.sessions.current']`. The plugin reads that value per window
-  over CDP and picks that window's pane. Window-title matching is only a fallback.
+- **Every view has its own pane.** DSH mounts a pane UI per session view; the
+  view the user is looking at shows its address bar at full width, hidden views'
+  bars report `width` 0. All pane webviews parent to the same window page target.
+- **Selection is by the visible address bar.** Each window's shell page stores
+  the displayed Session id in `localStorage['dsh.sessions.current']`; the plugin
+  reads that (one evaluate per window) together with the visible address bar's
+  value. The caller's window decides which view belongs to the caller, and the
+  bar URL is normalized and matched against every webview in that window. There
+  is no first-webview fallback: an unmatched bar means no visible pane yet.
+  Window-title matching is only a fallback when no window yields a session id.
+- **Switching sessions switches the visible pane.** There is no handover of one
+  shared page: the newly displayed view's own bar and webview become the target,
+  and the previous view's webview is left alone.
+- **Pane spawn rule.** DSH creates a pane's `webview` target only after an
+  HTTP(S) URL loads in its address bar. So a view with no pane must first call
+  `browser_open` or `browser_navigate` *with* a URL, which types into the visible
+  bar and spawns the webview; every other tool needs an already-open visible pane
+  and fails fast otherwise. After opening, the plugin returns the webview with a
+  fresh target id (the visible view's spawned pane), or, when no new target
+  appears, an existing view whose URL the bar changed. A hidden view that already
+  showed that URL is never taken.
+- **Explicit `targetId` must be the caller's own pane.** An unknown id, a non-pane
+  target, or another webview (even in the same window) is refused.
 - **Not displayed, no pane.** A Session shown in no open window gets a clear
   error: switch to it in a DSH window first.
-- **Pane spawn rule.** DSH creates the pane's `webview` target only after an
-  HTTP(S) URL loads in its address bar. So the first call in a window must be
-  `browser_open` or `browser_navigate` *with* a URL; every other tool needs an
-  already-open pane and fails fast otherwise.
-- A pane renders in one window only; Sessions in other windows do not mirror it.
+- **Screenshots are bounded.** `Page.captureScreenshot` never completes on a
+  hidden webview, so `browser_screenshot` fails after 15s with an explicit
+  "pane may be hidden" error instead of hanging the turn.
 
 ## Cookie persistence
 
-The pane's cookie jar is in memory and shared by whoever drives it (DSH behavior),
-so logins end at every restart and the jar cannot be partitioned by workspace.
-After each successful call the plugin snapshots the jar
-(`Network.getAllCookies`) to `~/.dsh/browser-state/<workspace-hash>.json`
+The browser's cookie jar is in memory and shared by the app (DSH behavior), so
+logins end at every restart. After each successful call the plugin snapshots the
+jar (`Network.getAllCookies`) to `~/.dsh/browser-state/<workspace-hash>.json`
 (mode `0600`) for the **calling** workspace, and re-injects that workspace's
 cookies (`Network.setCookies`) on the first call after a restart. Files stay per
-workspace and are never merged; each captures the shared jar's state at that
+workspace and are never merged; each captures the app-wide jar's state at that
 workspace's calls. Restore happens once per workspace per process; a failed
 restore is retried on the next call.
 
@@ -54,22 +69,21 @@ The HTTP cache stays in memory and does not survive restarts — cookies only.
 
 | Tool | Purpose |
 |---|---|
-| `browser_targets` | List windows, the Session each shows, their panes, and every CDP target |
-| `browser_scope_probe` | Same mapping plus the chosen pane, its host window and why it was chosen |
-| `browser_open` | Open the window's browser pane, optionally loading a URL (the URL is required when no pane exists yet) |
-| `browser_attach` | Report the pane the calling Session drives, without navigating |
-| `browser_navigate` | Load a URL in the window's pane; hands an unreachable host to your default browser |
+| `browser_targets` | List windows, the Session each shows, each window's visible pane URL and webview count, and every CDP target |
+| `browser_scope_probe` | Same mapping plus the pane visible in the caller's view and why it was chosen |
+| `browser_open` | Open the pane visible in this session's view, optionally loading a URL (the URL is required when no visible pane exists yet) |
+| `browser_attach` | Report the pane visible in this session's view, without navigating |
+| `browser_navigate` | Load a URL in the visible pane; hands an unreachable host to your default browser |
 | `browser_open_external` | Open a URL in your own default browser; nothing is automated there |
 | `browser_snapshot` | Read URL, title, visible text, links and form fields |
 | `browser_click` | Click the first element matching a CSS selector |
 | `browser_type` | Set an input/textarea/select value, optionally pressing Enter |
 | `browser_evaluate` | Evaluate JavaScript in the page and return its value |
-| `browser_screenshot` | Save a PNG under `~/.dsh/browser-state/shots` (or an absolute `filePath`) |
+| `browser_screenshot` | Save a PNG under `~/.dsh/browser-state/shots` (or an absolute `filePath`); times out after 15s if the pane is hidden |
 
-Pane tools default to the pane of the window showing the calling Session. Where a
-tool takes an optional `targetId`, it must name that window's `webview` pane; an
-unknown id, a non-pane target, or a pane hosted by another window is rejected with
-an error.
+Pane tools default to the pane visible in the calling Session's view. Where a
+tool takes an optional `targetId`, it must name that same pane; an unknown id, a
+non-pane target, or any other webview is rejected with an error.
 
 ## Arming
 
@@ -103,10 +117,13 @@ order and failure behavior: [docs/DETAIL.md](docs/DETAIL.md).
   pane and cookies persist across restarts.
 - The CDP port is loopback-only but exposes every web content to local
   processes — a developer-machine setting, not a shared-host one.
-- Concurrent Sessions can act on the same tab; no per-call isolation or locking.
-- No HTTP-cache persistence and no pane mirroring. The pane's cookie jar is shared
-  by whoever drives the window; only the snapshot files stay per workspace.
-- Pane tools other than `browser_open` / `browser_navigate` need an open pane.
+- Each session drives the pane visible in its own view; other views' webviews are
+  never touched. Calls within the same view are not locked against each other.
+- No HTTP-cache persistence and no pane mirroring. The cookie jar itself is
+  app-wide; only the snapshot files stay per workspace.
+- Pane tools other than `browser_open` / `browser_navigate` need a visible pane.
+- A hidden pane cannot be screenshotted: the capture fails after 15s and asks you
+  to switch to that session.
 
 ## Development
 
@@ -115,8 +132,8 @@ node --check index.js && for f in lib/*.js; do node --check "$f"; done
 node --test
 ```
 
-`node --test` runs the unit tests for pane selection, handover and cookie state
-(no browser, no network).
+`node --test` runs the unit tests for per-view pane selection, visible-bar URL
+matching, the screenshot timeout and cookie state (no browser, no network).
 
 ## License
 

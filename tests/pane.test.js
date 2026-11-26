@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createTools } from '../index.js'
+import { matchVisiblePane } from '../lib/scope.js'
 import { loadCookies, saveCookies } from '../lib/state.js'
 
 // Cookie restore/snapshot resolve ~/.dsh/browser-state on every call.
@@ -38,16 +39,43 @@ function fakeCtx(workspaces = [WS_A, WS_B]) {
   }
 }
 
+/** One webview target in a window. */
+function view(id, { parentId = 'window-1', url = `https://${id}.example/` } = {}) {
+  const target = { id, type: 'webview', parentId, url }
+  return target
+}
+
 /** A window record shaped like `readWindows` output. */
-function windowRecord({ id = 'window-1', sessionId = 'session-a', paneId = null, title = 'Session — DeepSeek Harness' }) {
+function windowRecord({
+  id = 'window-1',
+  sessionId = 'session-a',
+  title = 'Session — DeepSeek Harness',
+  views,
+  visiblePaneUrl,
+  paneId = null,
+} = {}) {
+  let allViews = views
+  if (allViews === undefined) {
+    allViews = paneId === null ? [] : [view(paneId, { parentId: id })]
+  }
+  if (visiblePaneUrl === undefined) {
+    visiblePaneUrl = allViews.length === 1 ? allViews[0].url : null
+  }
   return {
     pageTargetId: id,
     pageTitle: title,
     page: { id, type: 'page', title },
     currentSessionId: sessionId,
+    visiblePaneUrl,
     readError: null,
-    pane: paneId === null ? null : { id: paneId, type: 'webview', parentId: id, url: `https://${paneId}.example/` },
+    views: allViews,
+    pane: matchVisiblePane(allViews, visiblePaneUrl),
   }
+}
+
+/** Clone a window so one test's fake opens do not leak into shared fixtures. */
+function cloneWindow(win) {
+  return { ...win, views: win.views.map((candidate) => ({ ...candidate })) }
 }
 
 /** CDP session double that records every command. */
@@ -59,6 +87,7 @@ function fakeSession(state) {
     async send(method, params = {}) {
       calls.push({ method, params })
       if (method === 'Network.getAllCookies') return { cookies: state.cookies }
+      if (method === 'Page.captureScreenshot' && state.hangScreenshot) return new Promise(() => {})
       return {}
     },
     close() {
@@ -67,42 +96,79 @@ function fakeSession(state) {
   }
 }
 
+/** Add a freshly spawned webview with a unique `pane-N` id. */
+function spawnPane(state, win, url) {
+  const known = new Set(state.windows.flatMap((candidate) => candidate.views.map((v) => v.id)))
+  let n = 1
+  while (known.has(`pane-${n}`)) n += 1
+  const target = { id: `pane-${n}`, type: 'webview', parentId: win.pageTargetId, url }
+  win.views.push(target)
+  return target
+}
+
 /**
- * Tool set wired to fake CDP operations. `pane` starts as the window's existing
- * pane or null; opening one adds `PANE`, mirroring DSH. `windows` overrides the
- * default single-window view for read-only scenarios.
+ * Tool set wired to fake CDP operations. Each window holds every webview its
+ * session views spawned; `visiblePaneUrl` is the visible address bar. Opening
+ * through the visible bar navigates the pane that bar already shows, or spawns
+ * a new webview for the visible view, mirroring DSH.
  */
-function harness({ pane = null, currentSessionId = 'session-a', windows, workspaces, cookies = [] } = {}) {
-  const state = { pane, openCalls: [], sleeps: 0, evaluates: [], cookies }
+function harness({
+  pane = null,
+  currentSessionId = 'session-a',
+  windows,
+  workspaces,
+  cookies = [],
+  openPane,
+  hangScreenshot = false,
+} = {}) {
+  const state = {
+    windows: windows !== undefined
+      ? windows.map(cloneWindow)
+      : [windowRecord({
+          views: pane === null ? [] : [pane],
+          visiblePaneUrl: pane?.url ?? null,
+          sessionId: currentSessionId,
+        })],
+    openCalls: [],
+    sleeps: 0,
+    evaluates: [],
+    connectedTargets: [],
+    cookies,
+    hangScreenshot,
+  }
   const session = fakeSession(state)
   const cdp = {
     async fetchTargets() {
-      if (windows !== undefined) {
-        return windows.flatMap((win) => [win.page, ...(win.pane === null ? [] : [win.pane])])
-      }
-      return state.pane === null ? [PAGE] : [PAGE, state.pane]
+      return state.windows.flatMap((win) => [win.page, ...win.views])
     },
     async readWindows() {
-      if (windows !== undefined) return windows
-      return [{
-        pageTargetId: PAGE.id,
-        pageTitle: PAGE.title,
-        page: PAGE,
-        currentSessionId,
-        readError: null,
-        pane: state.pane,
-      }]
+      return state.windows.map((win) => ({
+        ...win,
+        pane: matchVisiblePane(win.views, win.visiblePaneUrl),
+      }))
     },
-    async connect() {
+    async connect(target) {
+      state.connectedTargets.push(target)
       return session
     },
     async evaluate(_session, expression) {
       state.evaluates.push(expression)
-      return JSON.stringify({ url: state.pane?.url ?? 'about:blank', title: 'Example', ready: 'complete' })
+      const target = state.connectedTargets[state.connectedTargets.length - 1]
+      return JSON.stringify({ url: target?.url ?? 'about:blank', title: 'Example', ready: 'complete' })
     },
     async openPaneInWindow(page, url) {
       state.openCalls.push({ page, url })
-      if (state.pane === null) state.pane = PANE
+      const win = state.windows.find((candidate) => candidate.pageTargetId === page.id)
+      if (win !== undefined) {
+        if (openPane !== undefined) {
+          openPane({ state, win, url })
+        } else {
+          const visible = matchVisiblePane(win.views, win.visiblePaneUrl)
+          if (visible !== null) visible.url = url
+          else spawnPane(state, win, url)
+          win.visiblePaneUrl = url
+        }
+      }
       return { windowTargetId: page.id, url: url ?? null }
     },
     async pressKey() {},
@@ -123,7 +189,7 @@ test('browser_open passes its url through to the pane opener', async () => {
   const output = await h.tool('browser_open').execute({ url: 'https://example.com' }, EXEC)
 
   assert.equal(h.state.openCalls.length, 1)
-  assert.equal(h.state.openCalls[0].page, PAGE)
+  assert.equal(h.state.openCalls[0].page.id, PAGE.id)
   assert.equal(h.state.openCalls[0].url, 'https://example.com')
   assert.equal(h.state.evaluates.length, 1)
   assert.match(output, /Pane pane-1/)
@@ -155,9 +221,9 @@ test('browser_open without a url reuses an existing pane', async () => {
   assert.match(output, /Pane pane-1/)
 })
 
-test('a tool without a url fails fast when the caller window has no pane', async () => {
+test('a tool without a url fails fast when the caller view has no visible pane', async () => {
   const h = harness()
-  const expected = /no browser pane is open in this window; call browser_open with an HTTP\(S\) url first/
+  const expected = /no browser pane is visible in this session's view; call browser_open with an HTTP\(S\) url first/
 
   await assert.rejects(h.tool('browser_snapshot').execute({}, EXEC), expected)
   await assert.rejects(h.tool('browser_open').execute({}, EXEC), expected)
@@ -183,7 +249,73 @@ test('browser_navigate loads a reused pane through Page.navigate', async () => {
   assert.deepEqual(navigations(h.session).map((call) => call.params.url), ['https://example.com/nav2'])
 })
 
-test('a session of another workspace drives the pane its window already hosts', async () => {
+test('with two webviews the caller drives the one matching the visible bar, even second', async () => {
+  const hidden = view('pane-hidden', { url: 'https://hidden.example/' })
+  const mine = view('pane-mine', { url: 'https://mine.example/' })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden, mine], visiblePaneUrl: 'https://mine.example/' })],
+  })
+
+  await h.tool('browser_snapshot').execute({}, EXEC)
+
+  assert.equal(h.state.openCalls.length, 0)
+  assert.equal(h.state.connectedTargets.length, 1)
+  assert.equal(h.state.connectedTargets[0].id, 'pane-mine')
+})
+
+test('browser_open spawns the caller view pane, never a hidden webview showing the same URL', async () => {
+  // Live dead end: hidden view shows example.org while the visible view is a
+  // restore screen. Opening example.org must spawn the visible pane.
+  const hidden = view('pane-1', { url: 'https://example.org/' })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: 'https://portal.example/user-portal' })],
+  })
+
+  const output = await h.tool('browser_open').execute({ url: 'https://example.org/' }, EXEC)
+
+  assert.equal(h.state.openCalls.length, 1)
+  assert.equal(h.state.openCalls[0].url, 'https://example.org/')
+  assert.equal(h.state.connectedTargets[0].id, 'pane-2')
+  assert.match(output, /Pane pane-2/)
+  const stillHidden = h.state.windows[0].views.find((candidate) => candidate.id === 'pane-1')
+  assert.equal(stillHidden.url, 'https://example.org/')
+})
+
+test('browser_open returns an existing view whose pane the bar navigated', async () => {
+  const existing = view('pane-9', { url: 'https://old.example/' })
+  const h = harness({
+    windows: [windowRecord({ views: [existing], visiblePaneUrl: 'https://restore.example/' })],
+    // DSH can resolve the typed URL onto the view's existing webview without spawning.
+    openPane: ({ win, url }) => {
+      win.views[0].url = url
+      win.visiblePaneUrl = url
+    },
+  })
+
+  const output = await h.tool('browser_open').execute({ url: 'https://target.example/' }, EXEC)
+
+  assert.equal(h.state.connectedTargets[0].id, 'pane-9')
+  assert.match(output, /Pane pane-9/)
+})
+
+test('browser_open never accepts an unchanged hidden webview that already shows the URL', async () => {
+  const hidden = view('pane-1', { url: 'https://example.org/' })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden], visiblePaneUrl: 'https://portal.example/user-portal' })],
+    // No visible webview spawns and the hidden one does not change.
+    openPane: ({ win, url }) => {
+      win.visiblePaneUrl = url
+    },
+  })
+
+  await assert.rejects(
+    h.tool('browser_open').execute({ url: 'https://example.org/' }, EXEC),
+    /the browser pane opened but no page target appeared/,
+  )
+  assert.equal(h.state.connectedTargets.length, 0)
+})
+
+test('a session of another workspace drives the pane its window already shows', async () => {
   // Workspace A opened pane-1; the user switched the window to workspace B's session.
   const h = harness({
     windows: [windowRecord({ id: 'window-1', sessionId: 'session-b', paneId: 'pane-1' })],
@@ -197,7 +329,7 @@ test('a session of another workspace drives the pane its window already hosts', 
   assert.match(output, /"url"/)
 })
 
-test('handover snapshots cookies to the calling workspace only', async () => {
+test('per-view calls snapshot cookies to the calling workspace only', async () => {
   const wsA = { id: 'handover-cookie-a', path: '/handover-cookie-a', sessionIds: ['session-ha'] }
   const wsB = { id: 'handover-cookie-b', path: '/handover-cookie-b', sessionIds: ['session-hb'] }
   const h = harness({
@@ -213,7 +345,7 @@ test('handover snapshots cookies to the calling workspace only', async () => {
   assert.deepEqual(await loadCookies(wsA), [])
 })
 
-test('restore injects the calling workspace\'s cookies into the window pane', async () => {
+test('restore injects the calling workspace\'s cookies into the visible pane', async () => {
   const workspace = { id: 'restore-caller-ws', path: '/restore-caller-ws', sessionIds: ['session-rc'] }
   await saveCookies(workspace, [cookie('sid', 'restore-me')])
   const h = harness({
@@ -230,7 +362,7 @@ test('restore injects the calling workspace\'s cookies into the window pane', as
   assert.deepEqual(setCookies.params.cookies, [cookie('sid', 'restore-me')])
 })
 
-test('an explicit targetId hosted by another window is refused', async () => {
+test('an explicit targetId naming another window\'s webview is refused', async () => {
   const h = harness({
     windows: [
       windowRecord({ id: 'window-1', sessionId: 'session-a', paneId: 'pane-1' }),
@@ -240,12 +372,26 @@ test('an explicit targetId hosted by another window is refused', async () => {
 
   await assert.rejects(
     h.tool('browser_snapshot').execute({ targetId: 'pane-2' }, EXEC),
-    /CDP target pane-2 is not the pane of the window showing this session; call browser_targets to list targets/,
+    /CDP target pane-2 is not this session's browser pane; call browser_targets to list targets/,
   )
   assert.equal(h.state.evaluates.length, 0)
 })
 
-test('an explicit targetId naming the caller window pane is accepted', async () => {
+test('an explicit targetId naming the window\'s other webview is refused', async () => {
+  const mine = view('pane-mine', { url: 'https://mine.example/' })
+  const other = view('pane-other', { url: 'https://other.example/' })
+  const h = harness({
+    windows: [windowRecord({ views: [mine, other], visiblePaneUrl: 'https://mine.example/' })],
+  })
+
+  await assert.rejects(
+    h.tool('browser_snapshot').execute({ targetId: 'pane-other' }, EXEC),
+    /CDP target pane-other is not this session's browser pane; call browser_targets to list targets/,
+  )
+  assert.equal(h.state.evaluates.length, 0)
+})
+
+test('an explicit targetId naming the caller\'s visible pane is accepted', async () => {
   const h = harness({
     windows: [
       windowRecord({ id: 'window-1', sessionId: 'session-a', paneId: 'pane-1' }),
@@ -256,4 +402,34 @@ test('an explicit targetId naming the caller window pane is accepted', async () 
   await h.tool('browser_snapshot').execute({ targetId: 'pane-1' }, EXEC)
 
   assert.equal(h.state.evaluates.length, 1)
+  assert.equal(h.state.connectedTargets[0].id, 'pane-1')
+})
+
+test('browser_screenshot times out with a clear error when capture never resolves', async () => {
+  const h = harness({ pane: PANE, hangScreenshot: true })
+
+  await assert.rejects(
+    h.tool('browser_screenshot').execute({}, EXEC),
+    /screenshot timed out after 15s; the pane may be hidden — switch to this session in its DSH window and retry/,
+  )
+  assert.ok(h.session.calls.some((call) => call.method === 'Page.captureScreenshot'))
+})
+
+test('browser_targets and browser_scope_probe report the visible pane URL and webview count', async () => {
+  const hidden = view('pane-hidden', { url: 'https://hidden.example/' })
+  const mine = view('pane-mine', { url: 'https://mine.example/' })
+  const h = harness({
+    windows: [windowRecord({ views: [hidden, mine], visiblePaneUrl: 'https://mine.example/' })],
+  })
+
+  const targets = JSON.parse(await h.tool('browser_targets').execute({}, EXEC))
+  assert.equal(targets.windows[0].visiblePaneUrl, 'https://mine.example/')
+  assert.equal(targets.windows[0].webviewCount, 2)
+  assert.equal(targets.windows[0].showsCaller, true)
+  assert.equal(targets.windows[0].paneTargetId, 'pane-mine')
+
+  const probe = JSON.parse(await h.tool('browser_scope_probe').execute({}, EXEC))
+  assert.equal(probe.windows[0].visiblePaneUrl, 'https://mine.example/')
+  assert.equal(probe.windows[0].webviewCount, 2)
+  assert.equal(probe.chosenPane.id, 'pane-mine')
 })
