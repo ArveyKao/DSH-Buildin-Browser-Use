@@ -28,10 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- Complete: live smoke passed all goal criteria (2026-11-26, receipt `changes/pane-spawn-fix/evidence/live-smoke.md`). Pane-spawn regression fixed (`abdf078`): URL pass-through restored, no double navigation, fail-fast URL-less error; 49/49 unit tests. Two sessions in deploy-gms shared one pane (A opened example.com, B snapshot read it); test cookie survived a DSH restart (`cookies restored: restored, persisted: 1`, document.cookie round-trip), then cleaned up (snapshot now empty).
-- Accepted: implement `tsk_f084a8a9` (672abe8) + fix `tsk_a6a7d30d` (abdf078), both verified and applied. Goal `goal_3cbefe11` (checks use portable `node --test`; the `tests/` dir-arg form is broken on homebrew Node 24.6.0).
-- Armed: profile links `@local/dsh-workspace-browser` → this repo; plugin live in DSH (LLM key resolved via host credential broker, not process env).
-- Note: first smoke prompt landed in the user's restored session-2a80ad35 (2 harmless turns); session B = session-0c81b1b0 is a fresh smoke session. Real SSO login remains the user's step in real use.
+- In flight: user-reported orphaned-pane dead end (goal `goal_256ed8e4`). Pane bound to deploy-gms; window switched to a deploy-yl-web session → gms sessions get "no open window shows a session of this workspace", yl-web gets "refusing to cross workspaces". Fix: pane follows the WINDOW displaying the calling session (any workspace); binding guard removed; cookie files stay per workspace. Worker task dispatched.
+- Delivered earlier: goal `goal_3cbefe11` (plugin + smoke + README), commits through `c80e2fb`, pushed. Live smoke receipt `changes/pane-spawn-fix/evidence/live-smoke.md`.
+- Armed: profile links `@local/dsh-workspace-browser` → this repo; DSH running with CDP (launched by owner).
+- Next: verify/accept/apply fix → restart DSH → re-verify user scenario (yl-web session drives gms-opened pane; switch back to gms session still works) → record receipts, goal done, push.
 
 ## Target applicability and access
 
