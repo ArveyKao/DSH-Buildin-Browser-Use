@@ -28,10 +28,10 @@ Keep stable facts needed to run, verify, and deliver this project. Link maintain
 
 ## Now
 
-- In flight: implement task `tsk_f084a8a9` (qoder worker, main workspace) — harden baseline plugin + unit tests + docs; goal `goal_90c6a5f6` active.
-- Accepted: feasibility verified live (CDP endpoint up, DSH 0.2.2-rc.5); architecture = native Host plugin + CDP; prototype imported as baseline commit `4417336`; runtime choice = qoder only (user, 2026-11-26); Qoder CLI v1.1.98 installed and signed in.
-- Blocked: nothing. Note: single-runtime choice means cross-family review is unavailable; owner verification + user acceptance substitutes (recorded decision).
-- Next: verify candidate (`node --test tests/` + syntax checks), owner review, decide/apply, then live CDP smoke with user (two sessions, one workspace; restart cookie restore).
+- In flight: live smoke (goal criterion 3) — waiting on user to restart DSH via the CDP launcher and run the two-session scenario.
+- Accepted: implement task `tsk_f084a8a9` verified (42/42 tests, syntax OK, diff claims checked) and applied; committed `672abe8`, pushed to github.com/ArveyKao/DSH-Buildin-Browser-Use. Goal checks pass (`goal_ba37c1c5`).
+- Armed: `~/.dsh/profiles/desktop/package.json` links `@local/dsh-workspace-browser` → this repo; obsolete `@local/dsh-builtin-browser` MCP bundle removed (user approved 2026-11-26; backup `package.json.bak-20261126-152741`). Takes effect on next DSH start.
+- Next: user restarts DSH with CDP launcher → session A `browser_open` a URL → session B (same workspace) `browser_snapshot` shows same pane → user signs in once → restart DSH → first browser call restores cookies. Record receipts, then `dispatch goal done`.
 
 ## Target applicability and access
 
